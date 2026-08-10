@@ -1,5 +1,11 @@
 from idms_db2_phase2.domain.models import ConversionInput, ConversionResult
 from idms_db2_phase2.services.cobol_transformer import CobolTransformer
+from idms_db2_phase2.services.db2_cursor_paragraph_generator import (
+    Db2CursorParagraphGenerator,
+)
+from idms_db2_phase2.services.db2_infrastructure_generator import (
+    Db2InfrastructureGenerator,
+)
 from idms_db2_phase2.services.field_reference_rewriter import FieldReferenceRewriter
 from idms_db2_phase2.services.pic_length_auto_fixer import PicLengthAutoFixer
 from idms_db2_phase2.services.production_validator import ProductionValidator
@@ -56,6 +62,32 @@ class ConversionService:
 
         validation_messages.extend(
             field_rewriter.rewrite_messages,
+        )
+
+        db2_infrastructure_generator = Db2InfrastructureGenerator()
+
+        converted_cobol, infrastructure_messages = db2_infrastructure_generator.apply(
+            cobol_text=converted_cobol,
+            dclgen_columns=conversion_input.dclgen_columns,
+            operations=operations,
+        )
+
+        validation_messages.extend(
+            infrastructure_messages,
+        )
+
+        cursor_paragraph_generator = Db2CursorParagraphGenerator(
+            mapping_rows=conversion_input.sheet_mapping_rows,
+            dclgen_columns=conversion_input.dclgen_columns,
+            operations=operations,
+        )
+
+        converted_cobol, cursor_paragraph_messages = cursor_paragraph_generator.apply(
+            converted_cobol,
+        )
+
+        validation_messages.extend(
+            cursor_paragraph_messages,
         )
 
         if conversion_input.auto_fix_pic_length_mismatches:
