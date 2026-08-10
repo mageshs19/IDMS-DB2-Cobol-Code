@@ -14,9 +14,11 @@ class SheetMappingRow:
     new_db2_field_name: str = ""
     new_db2_data_type: str = ""
     hopex_expression_type_remark: str = ""
+    remarks: str = ""
     relation: str = ""
     reference_field_name_copybook: str = ""
     reference_field_pic_clause: str = ""
+    cross_application_db2_table: str = ""
     cross_application_db2_field_name: str = ""
     cross_application_db2_data_type: str = ""
     basetype: str = ""
@@ -29,6 +31,7 @@ class DclgenColumn:
     db2_type: str = ""
     cobol_host_name: str = ""
     cobol_picture: str = ""
+    cobol_usage: str = ""
     nullable: bool = True
 
 
