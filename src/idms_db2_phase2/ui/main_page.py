@@ -18,7 +18,7 @@ def initialize_session_state() -> None:
         "dclgen_columns": [],
         "copybook_fields": [],
         "idms_cobol_text": "",
-        "idms_cobol_pdf_name": "",
+        "idms_cobol_source_name": "",
         "converted_cobol": "",
         "converted_cobol_file_name": "converted_db2_cobol.cbl",
         "validation_messages": [],
@@ -80,7 +80,7 @@ def render_main_tab() -> None:
 
     st.info(
         "Upload Sheet Mapping, one or more DCLGEN files, optional Copybook files, "
-        "and the IDMS COBOL program PDF to generate DB2 embedded SQL COBOL."
+        "and the IDMS COBOL source text file to generate DB2 embedded SQL COBOL."
     )
 
     col1, col2 = st.columns(2)
@@ -116,11 +116,14 @@ def render_main_tab() -> None:
             help="Optional. Upload one or more copybook text files if available.",
         )
 
-        idms_cobol_pdf_file = st.file_uploader(
-            "IDMS COBOL Program PDF",
-            type=["pdf"],
-            key="idms_cobol_pdf_file",
-            help="Upload the source IDMS COBOL program as PDF.",
+        idms_cobol_source_file = st.file_uploader(
+            "IDMS COBOL Source File",
+            type=None,
+            key="idms_cobol_source_file",
+            help=(
+                "Upload the source IDMS COBOL program as text/source file. "
+                "Examples: .txt, .cbl, .cob, .cpy."
+            ),
         )
 
     target_program_id = st.text_input(
@@ -144,7 +147,7 @@ def render_main_tab() -> None:
             sheet_mapping_file=sheet_mapping_file,
             dclgen_files=dclgen_files,
             copybook_files=copybook_files,
-            idms_cobol_pdf_file=idms_cobol_pdf_file,
+            idms_cobol_source_file=idms_cobol_source_file,
         )
 
     generate_clicked = st.button(
@@ -159,7 +162,7 @@ def render_main_tab() -> None:
                 sheet_mapping_file=sheet_mapping_file,
                 dclgen_files=dclgen_files,
                 copybook_files=copybook_files,
-                idms_cobol_pdf_file=idms_cobol_pdf_file,
+                idms_cobol_source_file=idms_cobol_source_file,
             )
 
         generate_cobol(
@@ -181,7 +184,7 @@ def load_inputs(
     sheet_mapping_file,
     dclgen_files,
     copybook_files,
-    idms_cobol_pdf_file,
+    idms_cobol_source_file,
 ) -> None:
     diagnostics: list[str] = []
     uploaded_file_names: dict[str, list[str] | str] = {}
@@ -278,31 +281,31 @@ def load_inputs(
         copybook_fields = []
 
     idms_cobol_text = ""
-    idms_cobol_pdf_name = ""
+    idms_cobol_source_name = ""
 
-    if idms_cobol_pdf_file is None:
-        diagnostics.append("IDMS COBOL PDF not uploaded.")
+    if idms_cobol_source_file is None:
+        diagnostics.append("IDMS COBOL source file not uploaded.")
     else:
-        idms_cobol_pdf_name = str(
-            idms_cobol_pdf_file.name or "",
+        idms_cobol_source_name = str(
+            idms_cobol_source_file.name or "",
         )
-        uploaded_file_names["idms_cobol_pdf"] = idms_cobol_pdf_name
+        uploaded_file_names["idms_cobol_source_file"] = idms_cobol_source_name
 
         try:
             idms_cobol_text = text_loader.read_uploaded_text(
-                idms_cobol_pdf_file,
+                idms_cobol_source_file,
             )
-            diagnostics.append(f"IDMS COBOL PDF uploaded: {idms_cobol_pdf_name}")
-            diagnostics.append(f"IDMS COBOL extracted text length: {len(idms_cobol_text)}")
+            diagnostics.append(f"IDMS COBOL source uploaded: {idms_cobol_source_name}")
+            diagnostics.append(f"IDMS COBOL source text length: {len(idms_cobol_text)}")
         except Exception as exc:
-            diagnostics.append(f"IDMS COBOL PDF read failed: {exc}")
+            diagnostics.append(f"IDMS COBOL source read failed: {exc}")
             idms_cobol_text = ""
 
     st.session_state.sheet_mapping_rows = sheet_rows
     st.session_state.dclgen_columns = dclgen_columns
     st.session_state.copybook_fields = copybook_fields
     st.session_state.idms_cobol_text = idms_cobol_text
-    st.session_state.idms_cobol_pdf_name = idms_cobol_pdf_name
+    st.session_state.idms_cobol_source_name = idms_cobol_source_name
     st.session_state.converted_cobol = ""
     st.session_state.converted_cobol_file_name = "converted_db2_cobol.cbl"
     st.session_state.validation_messages = []
@@ -322,6 +325,11 @@ def load_inputs(
     if dclgen_files and not dclgen_columns:
         st.warning(
             "DCLGEN files were uploaded but parsed as 0 columns. Open the Diagnostics tab to review detected table and field parsing."
+        )
+
+    if idms_cobol_source_file is not None and not idms_cobol_text.strip():
+        st.warning(
+            "IDMS COBOL source file was uploaded but no text was read. Open the Diagnostics tab for details."
         )
 
 
@@ -345,14 +353,14 @@ def generate_cobol(
     st.session_state.operations = result.operations
     st.session_state.converted_cobol_file_name = build_converted_cobol_file_name(
         target_program_id=target_program_id,
-        source_pdf_name=st.session_state.idms_cobol_pdf_name,
+        source_file_name=st.session_state.idms_cobol_source_name,
     )
     st.session_state.generated = True
 
 
 def build_converted_cobol_file_name(
     target_program_id: str,
-    source_pdf_name: str,
+    source_file_name: str,
 ) -> str:
     target = sanitize_file_stem(
         target_program_id,
@@ -363,9 +371,9 @@ def build_converted_cobol_file_name(
 
     source_stem = ""
 
-    if source_pdf_name:
+    if source_file_name:
         source_stem = Path(
-            source_pdf_name,
+            source_file_name,
         ).stem
 
     source_stem = sanitize_file_stem(
@@ -451,7 +459,7 @@ def render_current_status() -> None:
         cobol_loaded = "Yes" if st.session_state.idms_cobol_text.strip() else "No"
 
         st.metric(
-            "COBOL PDF Loaded",
+            "COBOL Source Loaded",
             cobol_loaded,
         )
 

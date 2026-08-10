@@ -20,7 +20,7 @@ class ValidationService:
 
         if not conversion_input.idms_cobol_text.strip():
             messages.append(
-                "IDMS COBOL PDF is required and must contain extractable text."
+                "IDMS COBOL source text file is required and must contain readable COBOL code."
             )
 
         return messages
