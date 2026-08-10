@@ -77,6 +77,7 @@ class ConversionInput:
     copybook_fields: list[CopybookField] = field(default_factory=list)
     idms_cobol_text: str = ""
     target_program_id: str = ""
+    auto_fix_pic_length_mismatches: bool = False
 
 
 @dataclass

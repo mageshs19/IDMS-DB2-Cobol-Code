@@ -60,7 +60,7 @@ class CobolTransformer:
         declared_cursors: set[str],
         validation_messages: list[str],
     ) -> list[str]:
-        upper = line.upper()
+        upper = line.upper().strip()
 
         if target_program_id and "PROGRAM-ID." in upper:
             return [
@@ -70,6 +70,14 @@ class CobolTransformer:
                     line,
                     flags=re.IGNORECASE,
                 )
+            ]
+
+        if self._is_idms_control_line(
+            upper,
+        ):
+            return [
+                f"           * DB2: Removed residual IDMS control statement: {line.strip()}",
+                "           CONTINUE.",
             ]
 
         if re.search(
@@ -334,6 +342,30 @@ class CobolTransformer:
             line,
         ]
 
+    def _is_idms_control_line(
+        self,
+        upper_line: str,
+    ) -> bool:
+        patterns = [
+            r"^BIND\b",
+            r"^BIND\s+RUN-UNIT\b",
+            r"^PERFORM\s+[A-Z0-9-]*IDMS-STATUS\b",
+            r"^PERFORM\s+[A-Z0-9-]*IDMS-ABORT\b",
+            r"^FIND\s+CURRENT\b",
+            r"^USAGE-MODE\s+IS\s+UPDATE\b",
+            r"^CONNECT\b",
+            r"^DISCONNECT\b",
+        ]
+
+        return any(
+            re.search(
+                pattern,
+                upper_line,
+                flags=re.IGNORECASE,
+            )
+            for pattern in patterns
+        )
+
     def _ensure_sqlca(
         self,
         text: str,
@@ -350,7 +382,7 @@ class CobolTransformer:
             )
 
             return pattern.sub(
-                "WORKING-STORAGE SECTION.\n"
+                "       WORKING-STORAGE SECTION.\n"
                 "           EXEC SQL\n"
                 "                INCLUDE SQLCA\n"
                 "           END-EXEC.",
@@ -371,6 +403,54 @@ class CobolTransformer:
         self,
         text: str,
     ) -> str:
+        lines = text.splitlines()
+        cleaned_lines: list[str] = []
+
+        inside_exec_sql = False
+
+        for raw_line in lines:
+            line = raw_line.rstrip()
+
+            if not line.strip():
+                cleaned_lines.append(
+                    "",
+                )
+                continue
+
+            upper = line.strip().upper()
+
+            if upper.startswith("EXEC SQL"):
+                inside_exec_sql = True
+                cleaned_lines.append(
+                    "           EXEC SQL",
+                )
+                continue
+
+            if upper.startswith("END-EXEC"):
+                inside_exec_sql = False
+                cleaned_lines.append(
+                    "           END-EXEC.",
+                )
+                continue
+
+            if inside_exec_sql:
+                cleaned_lines.append(
+                    self._format_sql_line(
+                        line,
+                    )
+                )
+                continue
+
+            cleaned_lines.append(
+                self._format_cobol_line(
+                    line,
+                )
+            )
+
+        text = "\n".join(
+            cleaned_lines,
+        )
+
         text = re.sub(
             r"\n{3,}",
             "\n\n",
@@ -378,3 +458,117 @@ class CobolTransformer:
         )
 
         return text.strip() + "\n"
+
+    def _format_sql_line(
+        self,
+        line: str,
+    ) -> str:
+        stripped = line.strip()
+        upper = stripped.upper()
+
+        sql_clause_prefixes = (
+            "DECLARE ",
+            "SELECT",
+            "INTO",
+            "FROM ",
+            "WHERE",
+            "ORDER BY",
+            "GROUP BY",
+            "HAVING",
+            "FETCH",
+            "OPEN ",
+            "CLOSE ",
+            "COMMIT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "SET",
+            "VALUES",
+        )
+
+        if upper.startswith(sql_clause_prefixes):
+            return f"                {stripped}"
+
+        if upper.startswith("AND "):
+            return f"                    {stripped}"
+
+        if upper.startswith("OR "):
+            return f"                    {stripped}"
+
+        return f"                    {stripped}"
+
+    def _format_cobol_line(
+        self,
+        line: str,
+    ) -> str:
+        stripped = line.strip()
+
+        if not stripped:
+            return ""
+
+        upper = stripped.upper()
+
+        if self._is_division_or_section_header(
+            upper,
+        ):
+            return f"       {stripped}"
+
+        if self._is_paragraph_header(
+            stripped,
+        ):
+            return f"       {stripped}"
+
+        if upper.startswith("*"):
+            return f"      {stripped}"
+
+        return f"           {stripped}"
+
+    def _is_division_or_section_header(
+        self,
+        upper: str,
+    ) -> bool:
+        headers = (
+            "IDENTIFICATION DIVISION.",
+            "ENVIRONMENT DIVISION.",
+            "DATA DIVISION.",
+            "PROCEDURE DIVISION.",
+            "CONFIGURATION SECTION.",
+            "INPUT-OUTPUT SECTION.",
+            "FILE SECTION.",
+            "WORKING-STORAGE SECTION.",
+            "LINKAGE SECTION.",
+        )
+
+        return upper in headers
+
+    def _is_paragraph_header(
+        self,
+        line: str,
+    ) -> bool:
+        stripped = line.strip()
+
+        if not stripped.endswith("."):
+            return False
+
+        upper = stripped.upper()
+
+        if " " in upper:
+            return False
+
+        if upper.startswith(
+            (
+                "IF",
+                "ELSE",
+                "END-IF",
+                "MOVE",
+                "PERFORM",
+            )
+        ):
+            return False
+
+        return bool(
+            re.fullmatch(
+                r"[A-Z0-9-]+\.",
+                upper,
+            )
+        )

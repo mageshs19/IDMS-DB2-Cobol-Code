@@ -27,6 +27,7 @@ def initialize_session_state() -> None:
         "loaded": False,
         "diagnostics": [],
         "uploaded_file_names": {},
+        "auto_fix_pic_length_mismatches": False,
     }
 
     for key, value in defaults.items():
@@ -136,6 +137,23 @@ def render_main_tab() -> None:
         ),
     )
 
+    auto_fix_pic_length_mismatches = st.checkbox(
+        "Auto-fix output PIC length mismatches",
+        value=st.session_state.auto_fix_pic_length_mismatches,
+        key="auto_fix_pic_length_mismatches_checkbox",
+        help=(
+            "When enabled, the converter expands target numeric PIC lengths "
+            "when a MOVE source has more digits than the output target."
+        ),
+    )
+
+    st.session_state.auto_fix_pic_length_mismatches = auto_fix_pic_length_mismatches
+
+    st.caption(
+        "Example: if WS field PIC 9(8) is moved to output field PIC 9(6), "
+        "the output field can be expanded to PIC 9(8)."
+    )
+
     load_clicked = st.button(
         "Load and Analyze Inputs",
         type="secondary",
@@ -167,6 +185,7 @@ def render_main_tab() -> None:
 
         generate_cobol(
             target_program_id=target_program_id,
+            auto_fix_pic_length_mismatches=auto_fix_pic_length_mismatches,
         )
 
     if st.session_state.generated:
@@ -335,6 +354,7 @@ def load_inputs(
 
 def generate_cobol(
     target_program_id: str,
+    auto_fix_pic_length_mismatches: bool,
 ) -> None:
     service = ConversionService()
 
@@ -345,6 +365,7 @@ def generate_cobol(
             copybook_fields=st.session_state.copybook_fields,
             idms_cobol_text=st.session_state.idms_cobol_text,
             target_program_id=target_program_id,
+            auto_fix_pic_length_mismatches=auto_fix_pic_length_mismatches,
         )
     )
 

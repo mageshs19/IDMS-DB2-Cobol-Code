@@ -163,8 +163,10 @@ class SqlGenerator:
         )
 
         if not hosts:
-            hosts = [
-                ":TODO-HOST-VARIABLE",
+            return [
+                f"           * TODO DB2: FETCH for {cursor_name} was not generated because no host variables were mapped.",
+                f"           * TODO DB2: Check Sheet Mapping rows for record {record_name}.",
+                "           CONTINUE.",
             ]
 
         return [
@@ -212,7 +214,7 @@ class SqlGenerator:
             rows,
         )
 
-        if not table or not columns:
+        if not table or not columns or not hosts:
             return self._todo(
                 f"Missing INSERT mapping for {record_name}"
             )
@@ -613,8 +615,8 @@ class SqlGenerator:
         row: SheetMappingRow,
     ) -> str:
         parent_reference = (
-            row.cross_application_db2_field_name
-            or row.reference_field_name_copybook
+            row.reference_field_name_copybook
+            or row.cross_application_db2_field_name
             or row.new_db2_field_name
         )
 
