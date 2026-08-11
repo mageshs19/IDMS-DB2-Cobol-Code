@@ -1,19 +1,17 @@
 import re
 
 from idms_db2_phase2.domain.models import DclgenColumn, IdmsOperation, SheetMappingRow
+from idms_db2_phase2.services.db2_infrastructure_generator import _Db2MappingContext
 from idms_db2_phase2.services.name_normalizer import NameNormalizer
 
 
 class Db2CursorParagraphGenerator:
     """
-    Generates generic DB2 OPEN/FETCH/CLOSE paragraphs.
+    Generates generic DB2 OPEN/FETCH/CLOSE cursor paragraphs.
 
-    Generic rules:
-    - No hardcoded program IDs.
-    - No hardcoded cursor names.
-    - No hardcoded DB2 table names.
-    - Cursor names are derived from IDMS set names.
-    - FETCH host variables are derived from Sheet Mapping + DCLGEN.
+    This class uses Sheet Mapping + DCLGEN to create real FETCH INTO host
+    variables. It avoids TODO FETCH paragraphs whenever DCLGEN columns can
+    be inferred from the child record or DB2 table.
     """
 
     GENERATED_MARKER = "* DB2 GENERATED CURSOR OPEN FETCH CLOSE PARAGRAPHS"
@@ -28,7 +26,10 @@ class Db2CursorParagraphGenerator:
         self.dclgen_columns = dclgen_columns
         self.operations = operations
         self.messages: list[str] = []
-        self.dclgen_lookup = self._build_dclgen_lookup()
+        self.context = _Db2MappingContext(
+            mapping_rows=mapping_rows,
+            dclgen_columns=dclgen_columns,
+        )
 
     def apply(
         self,
@@ -77,6 +78,13 @@ class Db2CursorParagraphGenerator:
             f"DB2 cursor paragraphs: generated {len(cursor_specs)} cursor paragraph set(s)."
         )
 
+        for spec in cursor_specs:
+            if not spec["host_variables"]:
+                self.messages.append(
+                    "DB2 cursor paragraphs: no FETCH host variables resolved for "
+                    f"cursor {spec['cursor_name']} record {spec['record_name']} table {spec['table_name']}."
+                )
+
         return updated_text, self.messages
 
     def _cursor_specs(
@@ -114,21 +122,29 @@ class Db2CursorParagraphGenerator:
                 set_name,
             )
 
+            table_name = self.context.best_table_for_record(
+                record_name,
+            )
+
+            host_variables = self.context.host_variables_for_record(
+                record_name=record_name,
+                table_name=table_name,
+            )
+
             cursor_name = self._cursor_name(
-                set_name=set_name,
+                set_name,
             )
 
             specs.append(
                 {
                     "set_name": set_name,
                     "record_name": record_name,
+                    "table_name": table_name,
                     "cursor_name": cursor_name,
                     "open_paragraph": f"OPEN-{cursor_name}",
                     "fetch_paragraph": f"FETCH-{cursor_name}",
                     "close_paragraph": f"CLOSE-{cursor_name}",
-                    "host_variables": self._fetch_host_variables(
-                        record_name=record_name,
-                    ),
+                    "host_variables": host_variables,
                 }
             )
 
@@ -140,18 +156,28 @@ class Db2CursorParagraphGenerator:
     ) -> str:
         lines: list[str] = [
             "",
-            "      ******************************************************************",
-            f"      * {self.GENERATED_MARKER}",
-            "      ******************************************************************",
+            "******************************************************************",
+            self.GENERATED_MARKER,
+            "******************************************************************",
             "",
         ]
 
         for spec in cursor_specs:
-            cursor_name = str(spec["cursor_name"])
-            open_paragraph = str(spec["open_paragraph"])
-            fetch_paragraph = str(spec["fetch_paragraph"])
-            close_paragraph = str(spec["close_paragraph"])
-            host_variables = list(spec["host_variables"])
+            cursor_name = str(
+                spec["cursor_name"],
+            )
+            open_paragraph = str(
+                spec["open_paragraph"],
+            )
+            fetch_paragraph = str(
+                spec["fetch_paragraph"],
+            )
+            close_paragraph = str(
+                spec["close_paragraph"],
+            )
+            host_variables = list(
+                spec["host_variables"],
+            )
 
             lines.extend(
                 self._open_paragraph(
@@ -159,7 +185,10 @@ class Db2CursorParagraphGenerator:
                     paragraph_name=open_paragraph,
                 )
             )
-            lines.append("")
+
+            lines.append(
+                "",
+            )
 
             lines.extend(
                 self._fetch_paragraph(
@@ -168,7 +197,10 @@ class Db2CursorParagraphGenerator:
                     host_variables=host_variables,
                 )
             )
-            lines.append("")
+
+            lines.append(
+                "",
+            )
 
             lines.extend(
                 self._close_paragraph(
@@ -176,9 +208,14 @@ class Db2CursorParagraphGenerator:
                     paragraph_name=close_paragraph,
                 )
             )
-            lines.append("")
 
-        return "\n".join(lines).rstrip() + "\n"
+            lines.append(
+                "",
+            )
+
+        return "\n".join(
+            lines,
+        ).rstrip() + "\n"
 
     def _open_paragraph(
         self,
@@ -186,18 +223,18 @@ class Db2CursorParagraphGenerator:
         paragraph_name: str,
     ) -> list[str]:
         return [
-            f"       {paragraph_name}.",
-            f"           MOVE '{paragraph_name}' TO SQL-LOCATION",
-            "           EXEC SQL",
-            f"                OPEN {cursor_name}",
-            "           END-EXEC.",
-            "           EVALUATE SQLCODE",
-            "               WHEN ZERO",
-            f"                   SET {cursor_name}-NOT-EOC TO TRUE",
-            "               WHEN OTHER",
-            f"                   DISPLAY 'ERROR WHILE OPENING CURSOR {cursor_name}'",
-            "                   PERFORM SQLERROR",
-            "           END-EVALUATE.",
+            f"{paragraph_name}.",
+            f"MOVE '{paragraph_name}' TO SQL-LOCATION.",
+            "EXEC SQL",
+            f"OPEN {cursor_name}",
+            "END-EXEC.",
+            "EVALUATE SQLCODE",
+            "WHEN ZERO",
+            f"SET {cursor_name}-NOT-EOC TO TRUE.",
+            "WHEN OTHER",
+            f"DISPLAY 'ERROR WHILE OPENING CURSOR {cursor_name}'.",
+            "PERFORM SQLERROR.",
+            "END-EVALUATE.",
         ]
 
     def _fetch_paragraph(
@@ -207,46 +244,46 @@ class Db2CursorParagraphGenerator:
         host_variables: list[str],
     ) -> list[str]:
         lines: list[str] = [
-            f"       {paragraph_name}.",
-            f"           MOVE '{paragraph_name}' TO SQL-LOCATION",
+            f"{paragraph_name}.",
+            f"MOVE '{paragraph_name}' TO SQL-LOCATION.",
         ]
 
         if not host_variables:
             lines.extend(
                 [
-                    f"           * TODO DB2: No FETCH host variables mapped for {cursor_name}.",
-                    "           CONTINUE.",
+                    f"* ERROR DB2: No FETCH host variables mapped for {cursor_name}.",
+                    "CONTINUE.",
                 ]
             )
             return lines
 
         lines.extend(
             [
-                "           EXEC SQL",
-                f"                FETCH {cursor_name}",
-                "                INTO",
+                "EXEC SQL",
+                f"FETCH {cursor_name}",
+                "INTO",
             ]
         )
 
-        for index, host_variable in enumerate(host_variables):
-            suffix = "," if index < len(host_variables) - 1 else ""
-
-            lines.append(
-                f"                    {host_variable}{suffix}"
+        lines.extend(
+            self._comma_lines(
+                host_variables,
+                "    ",
             )
+        )
 
         lines.extend(
             [
-                "           END-EXEC.",
-                "           EVALUATE SQLCODE",
-                "               WHEN ZERO",
-                "                   CONTINUE",
-                "               WHEN 100",
-                f"                   SET {cursor_name}-EOC TO TRUE",
-                "               WHEN OTHER",
-                f"                   DISPLAY 'ERROR WHILE FETCHING CURSOR {cursor_name}'",
-                "                   PERFORM SQLERROR",
-                "           END-EVALUATE.",
+                "END-EXEC.",
+                "EVALUATE SQLCODE",
+                "WHEN ZERO",
+                "CONTINUE.",
+                "WHEN 100",
+                f"SET {cursor_name}-EOC TO TRUE.",
+                "WHEN OTHER",
+                f"DISPLAY 'ERROR WHILE FETCHING CURSOR {cursor_name}'.",
+                "PERFORM SQLERROR.",
+                "END-EVALUATE.",
             ]
         )
 
@@ -258,229 +295,19 @@ class Db2CursorParagraphGenerator:
         paragraph_name: str,
     ) -> list[str]:
         return [
-            f"       {paragraph_name}.",
-            f"           MOVE '{paragraph_name}' TO SQL-LOCATION",
-            "           EXEC SQL",
-            f"                CLOSE {cursor_name}",
-            "           END-EXEC.",
-            "           EVALUATE SQLCODE",
-            "               WHEN ZERO",
-            "                   CONTINUE",
-            "               WHEN OTHER",
-            f"                   DISPLAY 'ERROR WHILE CLOSING CURSOR {cursor_name}'",
-            "                   PERFORM SQLERROR",
-            "           END-EVALUATE.",
+            f"{paragraph_name}.",
+            f"MOVE '{paragraph_name}' TO SQL-LOCATION.",
+            "EXEC SQL",
+            f"CLOSE {cursor_name}",
+            "END-EXEC.",
+            "EVALUATE SQLCODE",
+            "WHEN ZERO",
+            "CONTINUE.",
+            "WHEN OTHER",
+            f"DISPLAY 'ERROR WHILE CLOSING CURSOR {cursor_name}'.",
+            "PERFORM SQLERROR.",
+            "END-EVALUATE.",
         ]
-
-    def _fetch_host_variables(
-        self,
-        record_name: str,
-    ) -> list[str]:
-        rows = self._rows_for_record(
-            record_name=record_name,
-        )
-
-        host_variables: list[str] = []
-        seen: set[str] = set()
-
-        table_name = self._best_dclgen_table_for_rows(
-            rows=rows,
-        )
-
-        for row in rows:
-            column = NameNormalizer.normalize(
-                row.new_db2_field_name,
-            )
-
-            if not column:
-                continue
-
-            host = self._host_for_column(
-                table_name=table_name,
-                column_name=column,
-            )
-
-            if not host:
-                continue
-
-            if host in seen:
-                continue
-
-            seen.add(
-                host,
-            )
-            host_variables.append(
-                host,
-            )
-
-        return host_variables
-
-    def _host_for_column(
-        self,
-        table_name: str,
-        column_name: str,
-    ) -> str:
-        table = NameNormalizer.normalize(
-            table_name,
-        )
-        column = NameNormalizer.normalize(
-            column_name,
-        )
-
-        host = self.dclgen_lookup.get(
-            (
-                table,
-                column,
-            )
-        )
-
-        if not host:
-            host = self.dclgen_lookup.get(
-                (
-                    "",
-                    column,
-                )
-            )
-
-        if host:
-            return f":{host}"
-
-        if table and column:
-            return f":DCL{table}.{NameNormalizer.to_cobol(column)}"
-
-        if column:
-            return f":{NameNormalizer.to_cobol(column)}"
-
-        return ""
-
-    def _build_dclgen_lookup(
-        self,
-    ) -> dict[tuple[str, str], str]:
-        lookup: dict[tuple[str, str], str] = {}
-
-        for column in self.dclgen_columns:
-            table = NameNormalizer.normalize(
-                column.table_name,
-            )
-            column_name = NameNormalizer.normalize(
-                column.column_name,
-            )
-            host_name = NameNormalizer.to_cobol(
-                column.cobol_host_name or column.column_name,
-            )
-
-            if not column_name or not host_name:
-                continue
-
-            host_reference = f"DCL{table}.{host_name}" if table else host_name
-
-            lookup[
-                (
-                    table,
-                    column_name,
-                )
-            ] = host_reference
-
-            lookup[
-                (
-                    "",
-                    column_name,
-                )
-            ] = host_reference
-
-        return lookup
-
-    def _best_dclgen_table_for_rows(
-        self,
-        rows: list[SheetMappingRow],
-    ) -> str:
-        mapping_columns = {
-            NameNormalizer.normalize(
-                row.new_db2_field_name,
-            )
-            for row in rows
-            if row.new_db2_field_name
-        }
-
-        scores: dict[str, int] = {}
-
-        for column in self.dclgen_columns:
-            table = NameNormalizer.normalize(
-                column.table_name,
-            )
-            db2_column = NameNormalizer.normalize(
-                column.column_name,
-            )
-
-            if not table or not db2_column:
-                continue
-
-            if db2_column in mapping_columns:
-                scores[table] = scores.get(
-                    table,
-                    0,
-                ) + 1
-
-        if scores:
-            return max(
-                scores.items(),
-                key=lambda item: item[1],
-            )[0]
-
-        for row in rows:
-            table = NameNormalizer.normalize(
-                row.new_db2_record,
-            )
-
-            if table:
-                return table
-
-        return ""
-
-    def _rows_for_record(
-        self,
-        record_name: str,
-    ) -> list[SheetMappingRow]:
-        normalized_record = NameNormalizer.normalize(
-            record_name,
-        )
-        no_suffix = NameNormalizer.remove_record_suffix(
-            normalized_record,
-        )
-
-        rows: list[SheetMappingRow] = []
-
-        for row in self.mapping_rows:
-            row_record = NameNormalizer.normalize(
-                row.cobol_record_idms,
-            )
-            row_record_no_suffix = NameNormalizer.remove_record_suffix(
-                row_record,
-            )
-
-            if row_record in {normalized_record, no_suffix}:
-                rows.append(row)
-                continue
-
-            if row_record_no_suffix in {normalized_record, no_suffix}:
-                rows.append(row)
-
-        return rows
-
-    def _cursor_name(
-        self,
-        set_name: str,
-    ) -> str:
-        normalized = NameNormalizer.normalize(
-            set_name,
-        )
-
-        if not normalized:
-            return "C-IDMS-SET"
-
-        return "C-" + NameNormalizer.to_cobol(
-            normalized,
-        )
 
     def _replace_inline_open_fetch_close(
         self,
@@ -497,16 +324,16 @@ class Db2CursorParagraphGenerator:
             flags=re.IGNORECASE | re.MULTILINE,
         )
         updated = open_pattern.sub(
-            f"           PERFORM {open_paragraph}",
+            f"PERFORM {open_paragraph}.",
             updated,
         )
 
         fetch_pattern = re.compile(
-            rf"^\s*EXEC\s+SQL\s*\n\s*FETCH\s+{re.escape(cursor_name)}\s*.*?\n\s*END-EXEC\.?\s*$",
-            flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+            rf"^\s*EXEC\s+SQL\s*\n\s*FETCH\s+{re.escape(cursor_name)}(?:.|\n)*?END-EXEC\.?\s*$",
+            flags=re.IGNORECASE | re.MULTILINE,
         )
         updated = fetch_pattern.sub(
-            f"           PERFORM {fetch_paragraph}",
+            f"PERFORM {fetch_paragraph}.",
             updated,
         )
 
@@ -515,7 +342,7 @@ class Db2CursorParagraphGenerator:
             flags=re.IGNORECASE | re.MULTILINE,
         )
         updated = close_pattern.sub(
-            f"           PERFORM {close_paragraph}",
+            f"PERFORM {close_paragraph}.",
             updated,
         )
 
@@ -527,7 +354,7 @@ class Db2CursorParagraphGenerator:
         block: str,
     ) -> str:
         end_program_pattern = re.compile(
-            r"^\s*END\s+PROGRAM\b.*$",
+            r"^\s*(?:\d{6}\s+)?END\s+PROGRAM\b.*$",
             flags=re.IGNORECASE | re.MULTILINE,
         )
 
@@ -539,3 +366,34 @@ class Db2CursorParagraphGenerator:
             return text[: match.start()] + block + "\n" + text[match.start() :]
 
         return text.rstrip() + "\n\n" + block
+
+    def _cursor_name(
+        self,
+        set_name: str,
+    ) -> str:
+        normalized = NameNormalizer.normalize(
+            set_name,
+        )
+
+        if not normalized:
+            return "C-IDMS-SET"
+
+        return "C-" + NameNormalizer.to_cobol(
+            normalized,
+        )
+
+    def _comma_lines(
+        self,
+        items: list[str],
+        indent: str,
+    ) -> list[str]:
+        output: list[str] = []
+
+        for index, item in enumerate(items):
+            suffix = "," if index < len(items) - 1 else ""
+
+            output.append(
+                f"{indent}{item}{suffix}",
+            )
+
+        return output

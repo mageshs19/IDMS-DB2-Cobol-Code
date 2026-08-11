@@ -14,13 +14,9 @@ class FieldReferenceRewriter:
     Becomes:
         DCLDZBEFFTV.AM-CNSTK-479BEFF
 
-    This works only when:
-        - Sheet Mapping contains source COBOL field -> DB2 column mapping.
-        - DCLGEN contains DB2 column -> COBOL host field mapping.
-
-    The rewriter is intentionally conservative:
-        - It rewrites only qualified references: FIELD OF RECORD or FIELD IN RECORD.
-        - It does not rewrite every unqualified field name because that can break report/file fields.
+    This rewriter is conservative:
+    - it rewrites qualified references FIELD OF RECORD and FIELD IN RECORD
+    - it avoids unqualified field replacement
     """
 
     def __init__(
@@ -30,8 +26,7 @@ class FieldReferenceRewriter:
     ) -> None:
         self.mapping_rows = mapping_rows
         self.dclgen_columns = dclgen_columns
-        self.record_names = self._build_record_names()
-        self.column_to_dclgen_host = self._build_column_to_dclgen_host()
+        self.dclgen_host_lookup = self._build_dclgen_host_lookup()
         self.source_reference_map = self._build_source_reference_map()
         self.rewrite_messages: list[str] = []
 
@@ -39,6 +34,8 @@ class FieldReferenceRewriter:
         self,
         text: str,
     ) -> str:
+        self.rewrite_messages = []
+
         if not text:
             return ""
 
@@ -53,6 +50,9 @@ class FieldReferenceRewriter:
             reverse=True,
         ):
             source_field, source_record = key
+
+            if not source_field or not source_record or not target:
+                continue
 
             patterns = [
                 rf"\b{re.escape(source_field)}\s+OF\s+{re.escape(source_record)}\b",
@@ -76,131 +76,76 @@ class FieldReferenceRewriter:
 
         return rewritten
 
-    def _build_record_names(
-        self,
-    ) -> set[str]:
-        names: set[str] = set()
-
-        for row in self.mapping_rows:
-            record = NameNormalizer.to_cobol(
-                row.cobol_record_idms,
-            )
-
-            if record:
-                names.add(
-                    record,
-                )
-
-        return names
-
-    def _build_column_to_dclgen_host(
-        self,
-    ) -> dict[tuple[str, str], str]:
-        lookup: dict[tuple[str, str], str] = {}
-
-        for column in self.dclgen_columns:
-            table_name = NameNormalizer.normalize(
-                column.table_name,
-            )
-
-            column_name = NameNormalizer.normalize(
-                column.column_name,
-            )
-
-            host_name = NameNormalizer.to_cobol(
-                column.cobol_host_name or column.column_name,
-            )
-
-            if not table_name or not column_name:
-                continue
-
-            if not host_name:
-                continue
-
-            group_name = self._dclgen_group_name(
-                table_name,
-            )
-
-            lookup[
-                (
-                    table_name,
-                    column_name,
-                )
-            ] = f"{group_name}.{host_name}"
-
-            lookup[
-                (
-                    "",
-                    column_name,
-                )
-            ] = f"{group_name}.{host_name}"
-
-        return lookup
-
     def _build_source_reference_map(
         self,
     ) -> dict[tuple[str, str], str]:
-        mapping: dict[tuple[str, str], str] = {}
+        output: dict[tuple[str, str], str] = {}
 
         for row in self.mapping_rows:
             source_record = NameNormalizer.to_cobol(
                 row.cobol_record_idms,
             )
 
-            source_field = self._source_field_from_cobol_zone(
-                row.cobol_zone,
+            source_field_candidates = self._source_field_candidates(
+                row,
             )
 
-            db2_table = NameNormalizer.normalize(
-                row.new_db2_record,
+            target = self._target_host_reference(
+                row,
             )
 
-            db2_column = NameNormalizer.normalize(
-                row.new_db2_field_name,
-            )
-
-            if not source_record or not source_field:
+            if not source_record or not target:
                 continue
 
-            if not db2_column:
-                continue
+            for source_field in source_field_candidates:
+                if not source_field:
+                    continue
 
-            target = self.column_to_dclgen_host.get(
-                (
-                    db2_table,
-                    db2_column,
-                )
-            )
-
-            if not target:
-                target = self.column_to_dclgen_host.get(
+                output[
                     (
-                        "",
-                        db2_column,
+                        source_field,
+                        source_record,
+                    )
+                ] = target
+
+                no_suffix_record = NameNormalizer.to_cobol(
+                    NameNormalizer.remove_record_suffix(
+                        source_record,
                     )
                 )
 
-            if not target:
-                if db2_table:
-                    target = (
-                        f"{self._dclgen_group_name(db2_table)}."
-                        f"{NameNormalizer.to_cobol(db2_column)}"
-                    )
-                else:
-                    target = NameNormalizer.to_cobol(
-                        db2_column,
-                    )
+                if no_suffix_record and no_suffix_record != source_record:
+                    output[
+                        (
+                            source_field,
+                            no_suffix_record,
+                        )
+                    ] = target
 
-            mapping[
-                (
-                    source_field,
-                    source_record,
+        return output
+
+    def _source_field_candidates(
+        self,
+        row: SheetMappingRow,
+    ) -> list[str]:
+        candidates: list[str] = []
+
+        for value in [
+            row.cobol_zone,
+            row.reference_field_name_copybook,
+        ]:
+            source = self._source_field_from_value(
+                value,
+            )
+
+            if source and source not in candidates:
+                candidates.append(
+                    source,
                 )
-            ] = target
 
-        return mapping
+        return candidates
 
-    def _source_field_from_cobol_zone(
+    def _source_field_from_value(
         self,
         value: str,
     ) -> str:
@@ -211,27 +156,108 @@ class FieldReferenceRewriter:
         if not text:
             return ""
 
-        text = re.sub(
-            r"^\s*\d{2}\s+",
-            "",
-            text,
+        text = " ".join(
+            text.split(),
         )
 
-        text = text.strip()
+        parts = text.split(
+            " ",
+            1,
+        )
 
-        if not text:
+        if parts and parts[0].isdigit():
+            if len(parts) > 1:
+                return NameNormalizer.to_cobol(
+                    parts[1],
+                )
+
             return ""
 
         return NameNormalizer.to_cobol(
             text,
         )
 
-    def _dclgen_group_name(
+    def _target_host_reference(
         self,
-        table_name: str,
+        row: SheetMappingRow,
     ) -> str:
-        normalized = NameNormalizer.normalize(
-            table_name,
+        table = NameNormalizer.normalize(
+            row.new_db2_record,
         )
 
-        return f"DCL{normalized}"
+        column = NameNormalizer.normalize(
+            row.new_db2_field_name,
+        )
+
+        if not column:
+            return ""
+
+        if table:
+            host = self.dclgen_host_lookup.get(
+                (
+                    table,
+                    column,
+                )
+            )
+
+            if host:
+                return host
+
+            return f"DCL{table}.{NameNormalizer.to_cobol(column)}"
+
+        host = self.dclgen_host_lookup.get(
+            (
+                "",
+                column,
+            )
+        )
+
+        if host:
+            return host
+
+        return NameNormalizer.to_cobol(
+            column,
+        )
+
+    def _build_dclgen_host_lookup(
+        self,
+    ) -> dict[tuple[str, str], str]:
+        lookup: dict[tuple[str, str], str] = {}
+
+        for column in self.dclgen_columns:
+            table = NameNormalizer.normalize(
+                column.table_name,
+            )
+
+            db2_column = NameNormalizer.normalize(
+                column.column_name,
+            )
+
+            host_name = NameNormalizer.to_cobol(
+                column.cobol_host_name or column.column_name,
+            )
+
+            if not db2_column or not host_name:
+                continue
+
+            host_reference = (
+                f"DCL{table}.{host_name}"
+                if table
+                else host_name
+            )
+
+            lookup[
+                (
+                    table,
+                    db2_column,
+                )
+            ] = host_reference
+
+            lookup[
+                (
+                    "",
+                    db2_column,
+                )
+            ] = host_reference
+
+        return lookup
