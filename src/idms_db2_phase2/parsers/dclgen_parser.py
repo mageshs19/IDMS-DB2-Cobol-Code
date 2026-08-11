@@ -5,6 +5,11 @@ from idms_db2_phase2.domain.models import DclgenColumn
 
 class DclgenParser:
     DECLARE_TABLE = re.compile(
+        r"EXEC\s+SQL\s+DECLARE\s+([A-Z0-9_.$#@]+)\s+TABLE",
+        re.IGNORECASE,
+    )
+
+    DECLARE_TABLE_ALT = re.compile(
         r"DECLARE\s+([A-Z0-9_.$#@]+)\s+TABLE",
         re.IGNORECASE,
     )
@@ -133,122 +138,161 @@ class DclgenParser:
             text,
         )
 
-        table_name = self._find_table_name(
+        sections = self._split_dclgen_sections(
             cleaned_text,
         )
 
-        self.diagnostics.append(
-            f"{source_label}: detected table name: {table_name}"
-        )
+        if not sections:
+            self.diagnostics.append(
+                f"{source_label}: no DECLARE TABLE sections found; trying fallback COBOL-only parse."
+            )
 
-        sql_columns = self._find_sql_columns(
-            text=cleaned_text,
-            source_label=source_label,
-        )
+            table_name = self._find_table_name(
+                cleaned_text,
+            )
 
-        self.diagnostics.append(
-            f"{source_label}: SQL columns found: {len(sql_columns)}"
-        )
+            cobol_fields = self._find_cobol_fields(
+                text=cleaned_text,
+                source_label=source_label,
+            )
 
-        cobol_fields = self._find_cobol_fields(
-            text=cleaned_text,
-            source_label=source_label,
-        )
-
-        self.diagnostics.append(
-            f"{source_label}: COBOL PIC fields found: {len(cobol_fields)}"
-        )
+            return self._fallback_columns_from_cobol_fields(
+                table_name=table_name,
+                cobol_fields=cobol_fields,
+            )
 
         output: list[DclgenColumn] = []
 
-        for index, column in enumerate(sql_columns):
-            cobol_host_name = ""
-            cobol_picture = ""
-            cobol_usage = ""
+        self.diagnostics.append(
+            f"{source_label}: DECLARE TABLE sections found: {len(sections)}"
+        )
 
-            if index < len(cobol_fields):
-                cobol_host_name = cobol_fields[index]["name"]
-                cobol_picture = cobol_fields[index]["picture"]
-                cobol_usage = cobol_fields[index]["usage"]
+        for section_index, section in enumerate(sections, start=1):
+            section_label = f"{source_label} section {section_index}"
+            table_name = section["table_name"]
+            section_text = section["text"]
 
-            output.append(
-                DclgenColumn(
-                    table_name=table_name,
-                    column_name=column["name"],
-                    db2_type=column["type"],
-                    cobol_host_name=cobol_host_name,
-                    cobol_picture=cobol_picture,
-                    cobol_usage=cobol_usage,
-                    nullable=column["nullable"],
-                )
+            self.diagnostics.append(
+                f"{section_label}: detected table name: {table_name}"
             )
 
-        if output:
-            return output
+            sql_columns = self._find_sql_columns(
+                text=section_text,
+                source_label=section_label,
+            )
 
-        fallback = self._fallback_columns_from_cobol_fields(
-            table_name=table_name,
-            cobol_fields=cobol_fields,
+            self.diagnostics.append(
+                f"{section_label}: SQL columns found: {len(sql_columns)}"
+            )
+
+            cobol_fields = self._find_cobol_fields(
+                text=section_text,
+                source_label=section_label,
+            )
+
+            self.diagnostics.append(
+                f"{section_label}: COBOL PIC fields found: {len(cobol_fields)}"
+            )
+
+            for index, column in enumerate(sql_columns):
+                cobol_host_name = ""
+                cobol_picture = ""
+                cobol_usage = ""
+
+                if index < len(cobol_fields):
+                    cobol_host_name = cobol_fields[index]["name"]
+                    cobol_picture = cobol_fields[index]["picture"]
+                    cobol_usage = cobol_fields[index]["usage"]
+
+                output.append(
+                    DclgenColumn(
+                        table_name=table_name,
+                        column_name=column["name"],
+                        db2_type=column["type"],
+                        cobol_host_name=cobol_host_name,
+                        cobol_picture=cobol_picture,
+                        cobol_usage=cobol_usage,
+                        nullable=column["nullable"],
+                    )
+                )
+
+            if not sql_columns and cobol_fields:
+                output.extend(
+                    self._fallback_columns_from_cobol_fields(
+                        table_name=table_name,
+                        cobol_fields=cobol_fields,
+                    )
+                )
+
+        return output
+
+    def _split_dclgen_sections(
+        self,
+        text: str,
+    ) -> list[dict[str, str]]:
+        matches = list(
+            self.DECLARE_TABLE.finditer(text)
         )
 
-        self.diagnostics.append(
-            f"{source_label}: fallback columns from COBOL fields: {len(fallback)}"
-        )
+        if not matches:
+            matches = list(
+                self.DECLARE_TABLE_ALT.finditer(text)
+            )
 
-        return fallback
+        sections: list[dict[str, str]] = []
+
+        for index, match in enumerate(matches):
+            table_name = self._normalize_sql_name(
+                match.group(1),
+            )
+
+            start = match.start()
+
+            if index + 1 < len(matches):
+                end = matches[index + 1].start()
+            else:
+                end = len(text)
+
+            section_text = text[start:end]
+
+            sections.append(
+                {
+                    "table_name": table_name,
+                    "text": section_text,
+                }
+            )
+
+        return sections
 
     def _clean_text(
         self,
         text: str,
     ) -> str:
-        value = str(
-            text or "",
-        )
-
-        value = value.replace(
-            "\ufeff",
-            "",
-        )
-        value = value.replace(
-            "\u00a0",
-            " ",
-        )
-        value = value.replace(
-            "\r\n",
-            "\n",
-        )
-        value = value.replace(
-            "\r",
-            "\n",
-        )
-
+        value = str(text or "")
+        value = value.replace("\ufeff", "")
+        value = value.replace("\u00a0", " ")
+        value = value.replace("\r\n", "\n")
+        value = value.replace("\r", "\n")
         return value
 
     def _find_table_name(
         self,
         text: str,
     ) -> str:
-        match = self.DECLARE_TABLE.search(
-            text,
-        )
+        match = self.DECLARE_TABLE.search(text)
 
         if match:
-            return self._normalize_sql_name(
-                match.group(
-                    1,
-                )
-            )
+            return self._normalize_sql_name(match.group(1))
 
-        match = self.DCLGEN_TABLE.search(
-            text,
-        )
+        match = self.DECLARE_TABLE_ALT.search(text)
 
         if match:
-            return self._normalize_sql_name(
-                match.group(
-                    1,
-                )
-            )
+            return self._normalize_sql_name(match.group(1))
+
+        match = self.DCLGEN_TABLE.search(text)
+
+        if match:
+            return self._normalize_sql_name(match.group(1))
 
         return ""
 
@@ -276,16 +320,12 @@ class DclgenParser:
         )
 
         for line in logical_lines:
-            column = self._parse_sql_column_line(
-                line,
-            )
+            column = self._parse_sql_column_line(line)
 
             if column is None:
                 continue
 
-            output.append(
-                column,
-            )
+            output.append(column)
 
         return output
 
@@ -294,9 +334,10 @@ class DclgenParser:
         text: str,
         source_label: str,
     ) -> str:
-        declare_match = self.DECLARE_TABLE.search(
-            text,
-        )
+        declare_match = self.DECLARE_TABLE.search(text)
+
+        if not declare_match:
+            declare_match = self.DECLARE_TABLE_ALT.search(text)
 
         if not declare_match:
             self.diagnostics.append(
@@ -306,10 +347,7 @@ class DclgenParser:
 
         start_position = declare_match.end()
         remaining = text[start_position:]
-
-        open_paren_position = remaining.find(
-            "(",
-        )
+        open_paren_position = remaining.find("(")
 
         if open_paren_position < 0:
             self.diagnostics.append(
@@ -340,6 +378,7 @@ class DclgenParser:
             index += 1
 
         body = remaining[body_start:]
+
         self.diagnostics.append(
             f"{source_label}: DECLARE TABLE body used until EOF length: {len(body)}"
         )
@@ -365,30 +404,18 @@ class DclgenParser:
             if line.startswith("*"):
                 continue
 
-            line = re.sub(
-                r"\s+",
-                " ",
-                line,
-            ).strip()
-
-            current_parts.append(
-                line,
-            )
+            line = re.sub(r"\s+", " ", line).strip()
+            current_parts.append(line)
 
             if line.endswith(","):
                 logical_lines.append(
-                    " ".join(
-                        current_parts,
-                    ).rstrip(",").strip()
+                    " ".join(current_parts).rstrip(",").strip()
                 )
-
                 current_parts = []
 
         if current_parts:
             logical_lines.append(
-                " ".join(
-                    current_parts,
-                ).rstrip(",").strip()
+                " ".join(current_parts).rstrip(",").strip()
             )
 
         return logical_lines
@@ -401,7 +428,6 @@ class DclgenParser:
             return None
 
         stripped = line.strip().rstrip(",")
-
         parts = stripped.split()
 
         if not parts:
@@ -412,22 +438,16 @@ class DclgenParser:
         if first_word in self.COLUMN_EXCLUDE_WORDS:
             return None
 
-        match = self.COLUMN_LINE.match(
-            stripped,
-        )
+        match = self.COLUMN_LINE.match(stripped)
 
         if not match:
             return None
 
         column_name = self._normalize_sql_name(
-            match.group(
-                1,
-            )
+            match.group(1)
         )
 
-        datatype_text = match.group(
-            2,
-        ).strip()
+        datatype_text = match.group(2).strip()
 
         if not column_name:
             return None
@@ -435,16 +455,12 @@ class DclgenParser:
         if column_name.upper() in self.COLUMN_EXCLUDE_WORDS:
             return None
 
-        datatype = self._extract_datatype(
-            datatype_text,
-        )
+        datatype = self._extract_datatype(datatype_text)
 
         if not datatype:
             return None
 
-        nullable = not self._contains_not_null(
-            datatype_text,
-        )
+        nullable = not self._contains_not_null(datatype_text)
 
         return {
             "name": column_name,
@@ -456,19 +472,9 @@ class DclgenParser:
         self,
         datatype_text: str,
     ) -> str:
-        text = str(
-            datatype_text or "",
-        ).strip()
-
-        text = text.rstrip(
-            ",",
-        )
-
-        text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        )
+        text = str(datatype_text or "").strip()
+        text = text.rstrip(",")
+        text = re.sub(r"\s+", " ", text)
 
         if not text:
             return ""
@@ -479,11 +485,7 @@ class DclgenParser:
             return ""
 
         first = tokens[0].upper()
-
-        first_base = first.split(
-            "(",
-            1,
-        )[0].upper()
+        first_base = first.split("(", 1)[0].upper()
 
         if first_base not in self.SQL_DATATYPE_STARTERS:
             return ""
@@ -507,18 +509,10 @@ class DclgenParser:
             }:
                 break
 
-            datatype_parts.append(
-                token,
-            )
+            datatype_parts.append(token)
 
-        datatype = " ".join(
-            datatype_parts,
-        )
-
-        datatype = datatype.replace(
-            " ",
-            "",
-        )
+        datatype = " ".join(datatype_parts)
+        datatype = datatype.replace(" ", "")
 
         return datatype.upper()
 
@@ -540,44 +534,27 @@ class DclgenParser:
         source_label: str,
     ) -> list[dict[str, str]]:
         output: list[dict[str, str]] = []
-
         lines = text.splitlines()
         index = 0
 
         while index < len(lines):
             line = lines[index].rstrip()
-
-            match = self.COBOL_FIELD_LINE.match(
-                line,
-            )
+            match = self.COBOL_FIELD_LINE.match(line)
 
             if not match:
                 index += 1
                 continue
 
-            level = match.group(
-                1,
-            )
+            level = match.group(1)
+            name = match.group(2).upper()
+            rest = match.group(3) or ""
 
-            name = match.group(
-                2,
-            ).upper()
-
-            rest = match.group(
-                3,
-            ) or ""
-
-            continuation_lines: list[str] = [
-                rest,
-            ]
-
+            continuation_lines: list[str] = [rest]
             lookahead = index + 1
 
             while lookahead < len(lines):
                 next_line = lines[lookahead].rstrip()
-                next_match = self.COBOL_FIELD_LINE.match(
-                    next_line,
-                )
+                next_match = self.COBOL_FIELD_LINE.match(next_line)
 
                 if next_match:
                     break
@@ -592,9 +569,7 @@ class DclgenParser:
                     lookahead += 1
                     continue
 
-                continuation_lines.append(
-                    stripped_next,
-                )
+                continuation_lines.append(stripped_next)
 
                 if stripped_next.endswith("."):
                     lookahead += 1
@@ -602,17 +577,9 @@ class DclgenParser:
 
                 lookahead += 1
 
-            combined = " ".join(
-                continuation_lines,
-            )
-
-            picture = self._extract_picture(
-                combined,
-            )
-
-            usage = self._extract_usage(
-                combined,
-            )
+            combined = " ".join(continuation_lines)
+            picture = self._extract_picture(combined)
+            usage = self._extract_usage(combined)
 
             if picture:
                 output.append(
@@ -624,10 +591,7 @@ class DclgenParser:
                     }
                 )
 
-            index = max(
-                lookahead,
-                index + 1,
-            )
+            index = max(lookahead, index + 1)
 
         if output:
             self.diagnostics.append(
@@ -640,37 +604,25 @@ class DclgenParser:
         self,
         text: str,
     ) -> str:
-        match = self.PIC_PATTERN.search(
-            text,
-        )
+        match = self.PIC_PATTERN.search(text)
 
         if not match:
             return ""
 
-        picture = match.group(
-            1,
-        ).strip()
-
-        picture = picture.rstrip(
-            ".",
-        ).strip()
-
+        picture = match.group(1).strip()
+        picture = picture.rstrip(".").strip()
         return picture
 
     def _extract_usage(
         self,
         text: str,
     ) -> str:
-        match = self.USAGE_PATTERN.search(
-            text,
-        )
+        match = self.USAGE_PATTERN.search(text)
 
         if not match:
             return ""
 
-        return match.group(
-            1,
-        ).strip().upper()
+        return match.group(1).strip().upper()
 
     def _fallback_columns_from_cobol_fields(
         self,
@@ -683,16 +635,11 @@ class DclgenParser:
             output.append(
                 DclgenColumn(
                     table_name=table_name,
-                    column_name=self._normalize_cobol_name_to_db2(
-                        field["name"],
-                    ),
+                    column_name=self._normalize_cobol_name_to_db2(field["name"]),
                     db2_type="",
                     cobol_host_name=field["name"],
                     cobol_picture=field["picture"],
-                    cobol_usage=field.get(
-                        "usage",
-                        "",
-                    ),
+                    cobol_usage=field.get("usage", ""),
                     nullable=True,
                 )
             )
@@ -703,30 +650,15 @@ class DclgenParser:
         self,
         value: str,
     ) -> str:
-        text = str(
-            value or "",
-        ).strip()
-
-        text = text.strip(
-            '"',
-        )
-        text = text.strip(
-            "'",
-        )
-        text = text.strip(
-            "`",
-        )
-        text = text.strip(
-            "[",
-        )
-        text = text.strip(
-            "]",
-        )
+        text = str(value or "").strip()
+        text = text.strip('"')
+        text = text.strip("'")
+        text = text.strip("`")
+        text = text.strip("[")
+        text = text.strip("]")
 
         if "." in text:
-            text = text.split(
-                ".",
-            )[-1]
+            text = text.split(".")[-1]
 
         return text.upper()
 
@@ -734,27 +666,8 @@ class DclgenParser:
         self,
         value: str,
     ) -> str:
-        text = str(
-            value or "",
-        ).strip().upper()
-
-        text = text.replace(
-            "-",
-            "_",
-        )
-
-        text = re.sub(
-            r"[^A-Z0-9_]+",
-            "_",
-            text,
-        )
-
-        text = re.sub(
-            r"_+",
-            "_",
-            text,
-        )
-
-        return text.strip(
-            "_",
-        )
+        text = str(value or "").strip().upper()
+        text = text.replace("-", "_")
+        text = re.sub(r"[^A-Z0-9_]+", "_", text)
+        text = re.sub(r"_+", "_", text)
+        return text.strip("_")

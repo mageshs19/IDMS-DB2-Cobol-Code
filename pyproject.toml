@@ -1,7 +1,7 @@
 [project]
 name = "idms-db2-code-conversion"
 version = "0.1.0"
-description = "Add your description here"
+description = "IDMS COBOL to DB2 COBOL Phase 2 converter"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -11,6 +11,12 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "streamlit>=1.61.1",
 ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [dependency-groups]
 dev = [

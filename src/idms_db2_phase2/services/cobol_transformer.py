@@ -6,44 +6,89 @@ from idms_db2_phase2.services.sql_generator import SqlGenerator
 
 
 class CobolTransformer:
-    def __init__(
-        self,
-        sql_generator: SqlGenerator,
-    ) -> None:
+    def __init__(self, sql_generator: SqlGenerator) -> None:
         self.sql_generator = sql_generator
         self.parser = CobolParser()
+        self.sql_error_paragraph = "SQL-ERROR"
 
     def transform(
         self,
         cobol_text: str,
         target_program_id: str = "",
     ) -> tuple[str, list[str], list[IdmsOperation]]:
+        self.sql_error_paragraph = self._detect_sql_error_paragraph(
+            cobol_text,
+        )
+
         operations = self.parser.analyze(
             cobol_text,
         )
 
         validation_messages: list[str] = []
         output_lines: list[str] = []
-
-        declared_cursors: set[str] = set()
+        used_cursor_records: dict[str, str] = {}
+        pending_close_set = ""
 
         for line in cobol_text.splitlines():
-            converted_lines = self._convert_line(
+            converted_lines, opened_set = self._convert_line(
                 line=line,
                 target_program_id=target_program_id,
-                declared_cursors=declared_cursors,
+                used_cursor_records=used_cursor_records,
                 validation_messages=validation_messages,
             )
+
+            if pending_close_set:
+                converted_lines = self._rewrite_sqlcode_100_loop_to_eoc_loop(
+                    lines=converted_lines,
+                    set_name=pending_close_set,
+                )
 
             output_lines.extend(
                 converted_lines,
             )
 
+            if opened_set:
+                pending_close_set = opened_set
+
+            converted_block = "\n".join(
+                converted_lines,
+            )
+
+            if pending_close_set and self._is_eoc_loop_line(
+                text=converted_block,
+                set_name=pending_close_set,
+            ):
+                output_lines.extend(
+                    self.sql_generator.close_cursor(
+                        pending_close_set,
+                    )
+                )
+                pending_close_set = ""
+
         converted = "\n".join(
             output_lines,
         )
 
-        converted = self._ensure_sqlca(
+        converted = self._remove_existing_standalone_sqlca(
+            converted,
+        )
+
+        converted = self._ensure_db2_infrastructure(
+            text=converted,
+            used_cursor_records=used_cursor_records,
+        )
+
+        converted = self._insert_cursor_paragraphs(
+            text=converted,
+            used_cursor_records=used_cursor_records,
+        )
+
+        converted = self._fix_end_program_name(
+            text=converted,
+            target_program_id=target_program_id,
+        )
+
+        converted = self._ensure_sql_error_paragraph(
             converted,
         )
 
@@ -57,10 +102,10 @@ class CobolTransformer:
         self,
         line: str,
         target_program_id: str,
-        declared_cursors: set[str],
+        used_cursor_records: dict[str, str],
         validation_messages: list[str],
-    ) -> list[str]:
-        upper = line.upper()
+    ) -> tuple[list[str], str]:
+        upper = line.upper().strip()
 
         if target_program_id and "PROGRAM-ID." in upper:
             return [
@@ -70,7 +115,15 @@ class CobolTransformer:
                     line,
                     flags=re.IGNORECASE,
                 )
-            ]
+            ], ""
+
+        if self._is_idms_control_line(
+            upper,
+        ):
+            return [
+                f"           * DB2: Removed residual IDMS control statement: {line.strip()}",
+                "           CONTINUE.",
+            ], ""
 
         if re.search(
             r"\bREADY\b",
@@ -79,7 +132,7 @@ class CobolTransformer:
             return [
                 "           * DB2: IDMS READY removed.",
                 "           CONTINUE.",
-            ]
+            ], ""
 
         if re.search(
             r"\bFINISH\b",
@@ -90,7 +143,7 @@ class CobolTransformer:
                 "           EXEC SQL",
                 "                COMMIT",
                 "           END-EXEC.",
-            ]
+            ], ""
 
         if re.search(
             r"\bCOMMIT\b",
@@ -100,15 +153,15 @@ class CobolTransformer:
                 "           EXEC SQL",
                 "                COMMIT",
                 "           END-EXEC.",
-            ]
+            ], ""
 
-        match = re.search(
+        obtain_calc_match = re.search(
             r"\bOBTAIN\s+(?:KEEP\s+)?([A-Z0-9-]+)\s+CALC\b",
             upper,
         )
 
-        if match:
-            record = match.group(
+        if obtain_calc_match:
+            record = obtain_calc_match.group(
                 1,
             ).upper()
 
@@ -118,31 +171,29 @@ class CobolTransformer:
                     record,
                 ),
                 "           IF SQLCODE NOT = 0 AND SQLCODE NOT = 100",
-                "                PERFORM SQL-ERROR",
+                f"                PERFORM {self.sql_error_paragraph}",
                 "           END-IF.",
-            ]
+            ], ""
 
-        match = re.search(
+        obtain_set_match = re.search(
             r"\bOBTAIN\s+(FIRST|NEXT)\s+([A-Z0-9-]+)\s+WITHIN\s+([A-Z0-9-]+)\b",
             upper,
         )
 
-        if match:
-            first_or_next = match.group(
+        if obtain_set_match:
+            first_or_next = obtain_set_match.group(
                 1,
             ).upper()
 
-            record = match.group(
+            record = obtain_set_match.group(
                 2,
             ).upper()
 
-            set_name = match.group(
+            set_name = obtain_set_match.group(
                 3,
             ).upper()
 
-            cursor_name = self.sql_generator.cursor_name(
-                set_name,
-            )
+            used_cursor_records[set_name] = record
 
             lines: list[str] = [
                 f"           * DB2: Converted OBTAIN {first_or_next} {record} WITHIN {set_name}.",
@@ -153,17 +204,7 @@ class CobolTransformer:
                 set_name=set_name,
             )
 
-            if cursor_name not in declared_cursors:
-                lines.extend(
-                    self.sql_generator.cursor_declare(
-                        record,
-                        set_name,
-                    )
-                )
-
-                declared_cursors.add(
-                    cursor_name,
-                )
+            opened_set = ""
 
             if first_or_next == "FIRST":
                 lines.extend(
@@ -171,92 +212,72 @@ class CobolTransformer:
                         set_name,
                     )
                 )
+                opened_set = set_name
 
             lines.extend(
                 self.sql_generator.fetch_cursor(
-                    record,
-                    set_name,
+                    record_name=record,
+                    set_name=set_name,
                 )
             )
 
             lines.extend(
                 [
                     "           IF SQLCODE NOT = 0 AND SQLCODE NOT = 100",
-                    "                PERFORM SQL-ERROR",
+                    f"                PERFORM {self.sql_error_paragraph}",
                     "           END-IF.",
                 ]
             )
 
             if not relationship_condition_found:
                 validation_messages.append(
-                    f"Cursor WHERE clause for set {set_name} could not be fully generated. "
-                    f"Review Sheet Mapping Relation/FK rows for record {record}."
+                    f"Cursor WHERE clause for set {set_name} could not be generated from Sheet Mapping relation/FK rows."
                 )
 
-            return lines
+            return lines, opened_set
 
-        match = re.search(
+        find_first_match = re.search(
             r"\bFIND\s+FIRST\s+([A-Z0-9-]+)?\s*WITHIN\s+([A-Z0-9-]+)\b",
             upper,
         )
 
-        if match:
+        if find_first_match:
             record = (
-                match.group(
+                find_first_match.group(
                     1,
                 )
                 or ""
             ).upper()
 
-            set_name = match.group(
+            set_name = find_first_match.group(
                 2,
             ).upper()
 
-            if not record:
+            if record:
+                used_cursor_records[set_name] = record
+            else:
                 validation_messages.append(
-                    f"FIND FIRST WITHIN {set_name} needs record inference."
+                    f"FIND FIRST WITHIN {set_name} needs record inference from source code or mapping."
                 )
 
-                return [
-                    f"           * TODO DB2: FIND FIRST WITHIN {set_name} needs record inference.",
-                    "           CONTINUE.",
-                ]
-
-            relationship_condition_found = self.sql_generator.has_cursor_relationship_condition(
-                record_name=record,
-                set_name=set_name,
-            )
-
-            lines = [
+            return [
                 f"           * DB2: Converted FIND FIRST {record} WITHIN {set_name}.",
-                *self.sql_generator.cursor_declare(
-                    record,
-                    set_name,
-                ),
                 *self.sql_generator.open_cursor(
                     set_name,
                 ),
                 *self.sql_generator.fetch_cursor(
-                    record,
-                    set_name,
+                    record_name=record,
+                    set_name=set_name,
                 ),
-            ]
+            ], set_name
 
-            if not relationship_condition_found:
-                validation_messages.append(
-                    f"Cursor WHERE clause for set {set_name} could not be fully generated. "
-                    f"Review Sheet Mapping Relation/FK rows for record {record}."
-                )
-
-            return lines
-
-        match = re.search(
+        store_match = re.search(
             r"\bSTORE\s+([A-Z0-9-]+)\b",
             upper,
         )
 
-        if match:
-            record = match.group(
+        if store_match:
+            record = store_match.group(
                 1,
             ).upper()
 
@@ -266,17 +287,17 @@ class CobolTransformer:
                     record,
                 ),
                 "           IF SQLCODE NOT = 0",
-                "                PERFORM SQL-ERROR",
+                f"                PERFORM {self.sql_error_paragraph}",
                 "           END-IF.",
-            ]
+            ], ""
 
-        match = re.search(
+        modify_match = re.search(
             r"\bMODIFY\s+([A-Z0-9-]+)\b",
             upper,
         )
 
-        if match:
-            record = match.group(
+        if modify_match:
+            record = modify_match.group(
                 1,
             ).upper()
 
@@ -286,17 +307,17 @@ class CobolTransformer:
                     record,
                 ),
                 "           IF SQLCODE NOT = 0",
-                "                PERFORM SQL-ERROR",
+                f"                PERFORM {self.sql_error_paragraph}",
                 "           END-IF.",
-            ]
+            ], ""
 
-        match = re.search(
+        erase_match = re.search(
             r"\bERASE\s+([A-Z0-9-]+)\b",
             upper,
         )
 
-        if match:
-            record = match.group(
+        if erase_match:
+            record = erase_match.group(
                 1,
             ).upper()
 
@@ -306,9 +327,9 @@ class CobolTransformer:
                     record,
                 ),
                 "           IF SQLCODE NOT = 0",
-                "                PERFORM SQL-ERROR",
+                f"                PERFORM {self.sql_error_paragraph}",
                 "           END-IF.",
-            ]
+            ], ""
 
         if "DB-REC-NOT-FOUND" in upper:
             return [
@@ -318,7 +339,7 @@ class CobolTransformer:
                     line,
                     flags=re.IGNORECASE,
                 )
-            ]
+            ], ""
 
         if "DB-END-OF-SET" in upper:
             return [
@@ -328,43 +349,281 @@ class CobolTransformer:
                     line,
                     flags=re.IGNORECASE,
                 )
-            ]
+            ], ""
 
-        return [
-            line,
-        ]
+        return [line], ""
 
-    def _ensure_sqlca(
+    def _rewrite_sqlcode_100_loop_to_eoc_loop(
+        self,
+        lines: list[str],
+        set_name: str,
+    ) -> list[str]:
+        cursor_name = self.sql_generator.cursor_name(
+            set_name,
+        )
+
+        eoc_condition = f"{cursor_name}-EOC"
+
+        rewritten: list[str] = []
+
+        for line in lines:
+            rewritten.append(
+                re.sub(
+                    r"\bUNTIL\s+SQLCODE\s*=\s*100\b",
+                    f"UNTIL {eoc_condition}",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+            )
+
+        return rewritten
+
+    def _is_eoc_loop_line(
+        self,
+        text: str,
+        set_name: str,
+    ) -> bool:
+        cursor_name = self.sql_generator.cursor_name(
+            set_name,
+        )
+
+        eoc_condition = f"{cursor_name}-EOC"
+
+        return bool(
+            re.search(
+                rf"\bPERFORM\b.+\bUNTIL\s+{re.escape(eoc_condition)}\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _ensure_db2_infrastructure(
+        self,
+        text: str,
+        used_cursor_records: dict[str, str],
+    ) -> str:
+        if "DB2 SQLCA, SQL ERROR WORKING STORAGE, DCLGEN INCLUDES, AND CURSOR FLAGS" in text:
+            return text
+
+        block = self.sql_generator.db2_infrastructure_block(
+            used_cursor_records=used_cursor_records,
+        )
+
+        if not block.strip():
+            return text
+
+        working_storage_pattern = re.compile(
+            r"(^\s*WORKING-STORAGE\s+SECTION\.\s*$)",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        working_storage_match = working_storage_pattern.search(
+            text,
+        )
+
+        if working_storage_match:
+            return (
+                text[: working_storage_match.end()]
+                + "\n"
+                + block
+                + text[working_storage_match.end() :]
+            )
+
+        procedure_pattern = re.compile(
+            r"(^\s*PROCEDURE\s+DIVISION\.\s*$)",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        procedure_match = procedure_pattern.search(
+            text,
+        )
+
+        if procedure_match:
+            return (
+                text[: procedure_match.start()]
+                + block
+                + "\n"
+                + text[procedure_match.start() :]
+            )
+
+        return block + "\n\n" + text
+
+    def _insert_cursor_paragraphs(
+        self,
+        text: str,
+        used_cursor_records: dict[str, str],
+    ) -> str:
+        if not used_cursor_records:
+            return text
+
+        if "DB2 GENERATED CURSOR OPEN FETCH CLOSE PARAGRAPHS" in text:
+            return text
+
+        block = self.sql_generator.cursor_paragraph_block(
+            used_cursor_records=used_cursor_records,
+            sql_error_paragraph=self.sql_error_paragraph,
+        )
+
+        if not block.strip():
+            return text
+
+        end_program_pattern = re.compile(
+            r"^\s*END\s+PROGRAM\b.*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        end_program_match = end_program_pattern.search(
+            text,
+        )
+
+        if end_program_match:
+            return (
+                text[: end_program_match.start()]
+                + block
+                + "\n"
+                + text[end_program_match.start() :]
+            )
+
+        return text.rstrip() + "\n\n" + block
+
+    def _remove_existing_standalone_sqlca(
         self,
         text: str,
     ) -> str:
-        if "INCLUDE SQLCA" in text.upper():
+        pattern = re.compile(
+            r"^\s*EXEC\s+SQL\s*\n\s*INCLUDE\s+SQLCA\s*\n\s*END-EXEC\.?\s*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        return pattern.sub(
+            "",
+            text,
+        )
+
+    def _detect_sql_error_paragraph(
+        self,
+        cobol_text: str,
+    ) -> str:
+        if re.search(
+            r"^\s*SQL-ERROR\.\s*$",
+            cobol_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            return "SQL-ERROR"
+
+        if re.search(
+            r"^\s*SQLERROR\.\s*$",
+            cobol_text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            return "SQLERROR"
+
+        return "SQL-ERROR"
+
+    def _fix_end_program_name(
+        self,
+        text: str,
+        target_program_id: str,
+    ) -> str:
+        program_id = self._current_program_id(
+            text=text,
+            target_program_id=target_program_id,
+        )
+
+        if not program_id:
             return text
 
-        marker = "WORKING-STORAGE SECTION."
+        return re.sub(
+            r"END\s+PROGRAM\s+[A-Z0-9-]+\.",
+            f"END PROGRAM {program_id}.",
+            text,
+            flags=re.IGNORECASE,
+        )
 
-        if marker in text.upper():
-            pattern = re.compile(
-                r"WORKING-STORAGE SECTION\.",
-                re.IGNORECASE,
+    def _current_program_id(
+        self,
+        text: str,
+        target_program_id: str,
+    ) -> str:
+        if target_program_id and target_program_id.strip():
+            return target_program_id.strip().upper()
+
+        match = re.search(
+            r"PROGRAM-ID\.\s+([A-Z0-9-]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).upper()
+
+        return ""
+
+    def _ensure_sql_error_paragraph(
+        self,
+        text: str,
+    ) -> str:
+        if re.search(
+            rf"^\s*{re.escape(self.sql_error_paragraph)}\.\s*$",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        ):
+            return text
+
+        paragraph = "\n".join(
+            [
+                "",
+                f"       {self.sql_error_paragraph}.",
+                "           DISPLAY 'DB2 SQL ERROR SQLCODE=' SQLCODE.",
+                "           DISPLAY 'DB2 SQL ERROR LOCATION=' SQL-LOCATION.",
+                "           CONTINUE.",
+                "",
+            ]
+        )
+
+        end_program_pattern = re.compile(
+            r"^\s*END\s+PROGRAM\b.*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        end_program_match = end_program_pattern.search(
+            text,
+        )
+
+        if end_program_match:
+            return (
+                text[: end_program_match.start()]
+                + paragraph
+                + "\n"
+                + text[end_program_match.start() :]
             )
 
-            return pattern.sub(
-                "       WORKING-STORAGE SECTION.\n"
-                "           EXEC SQL\n"
-                "                INCLUDE SQLCA\n"
-                "           END-EXEC.",
-                text,
-                count=1,
-            )
+        return text.rstrip() + "\n" + paragraph
 
-        return (
-            "       DATA DIVISION.\n"
-            "       WORKING-STORAGE SECTION.\n"
-            "           EXEC SQL\n"
-            "                INCLUDE SQLCA\n"
-            "           END-EXEC.\n"
-            + text
+    def _is_idms_control_line(
+        self,
+        upper_line: str,
+    ) -> bool:
+        normalized = upper_line.strip().rstrip(".")
+
+        patterns = [
+            r"^BIND\b",
+            r"^BIND\s+RUN-UNIT\b",
+            r"^PERFORM\s+[A-Z0-9-]*IDMS-STATUS\b",
+            r"^PERFORM\s+[A-Z0-9-]*IDMS-ABORT\b",
+            r"^FIND\s+CURRENT\b",
+            r"^USAGE-MODE\s+IS\s+UPDATE\b",
+            r"^CONNECT\b",
+            r"^DISCONNECT\b",
+        ]
+
+        return any(
+            re.search(
+                pattern,
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            for pattern in patterns
         )
 
     def _cleanup(
@@ -373,50 +632,53 @@ class CobolTransformer:
     ) -> str:
         lines = text.splitlines()
         cleaned_lines: list[str] = []
-
         inside_exec_sql = False
+        evaluate_depth = 0
+        pending_multiline_move = False
 
         for raw_line in lines:
-            line = raw_line.rstrip()
+            stripped = raw_line.strip()
 
-            if not line.strip():
-                cleaned_lines.append(
-                    "",
-                )
+            if not stripped:
+                cleaned_lines.append("")
                 continue
 
-            upper = line.strip().upper()
+            upper = stripped.upper()
 
             if upper.startswith("EXEC SQL"):
                 inside_exec_sql = True
-                cleaned_lines.append(
-                    "           EXEC SQL",
-                )
+                cleaned_lines.append("           EXEC SQL")
                 continue
 
             if upper.startswith("END-EXEC"):
                 inside_exec_sql = False
-                cleaned_lines.append(
-                    "           END-EXEC.",
-                )
+                cleaned_lines.append("           END-EXEC.")
                 continue
 
             if inside_exec_sql:
                 cleaned_lines.append(
                     self._format_sql_line(
-                        line,
+                        stripped,
                     )
                 )
                 continue
 
+            formatted_line, evaluate_depth, pending_multiline_move = self._format_cobol_line(
+                stripped=stripped,
+                evaluate_depth=evaluate_depth,
+                pending_multiline_move=pending_multiline_move,
+            )
+
             cleaned_lines.append(
-                self._format_cobol_line(
-                    line,
-                )
+                formatted_line,
             )
 
         text = "\n".join(
             cleaned_lines,
+        )
+
+        text = self._normalize_period_spacing(
+            text,
         )
 
         text = re.sub(
@@ -429,9 +691,8 @@ class CobolTransformer:
 
     def _format_sql_line(
         self,
-        line: str,
+        stripped: str,
     ) -> str:
-        stripped = line.strip()
         upper = stripped.upper()
 
         sql_clause_prefixes = (
@@ -452,6 +713,8 @@ class CobolTransformer:
             "DELETE",
             "SET",
             "VALUES",
+            "FOR READ ONLY",
+            "INCLUDE",
         )
 
         if upper.startswith(sql_clause_prefixes):
@@ -463,33 +726,63 @@ class CobolTransformer:
         if upper.startswith("OR "):
             return f"                    {stripped}"
 
+        if stripped.startswith(","):
+            return f"                   {stripped}"
+
         return f"                    {stripped}"
 
     def _format_cobol_line(
         self,
-        line: str,
-    ) -> str:
-        stripped = line.strip()
-
-        if not stripped:
-            return ""
-
+        stripped: str,
+        evaluate_depth: int,
+        pending_multiline_move: bool,
+    ) -> tuple[str, int, bool]:
         upper = stripped.upper()
 
-        if self._is_division_or_section_header(
-            upper,
-        ):
-            return f"       {stripped}"
+        if self._is_division_or_section_header(upper):
+            return f"       {stripped}", evaluate_depth, False
 
-        if self._is_paragraph_header(
-            stripped,
-        ):
-            return f"       {stripped}"
+        if self._is_paragraph_header(stripped):
+            return f"       {stripped}", evaluate_depth, False
 
         if upper.startswith("*"):
-            return f"      {stripped}"
+            return f"      {stripped}", evaluate_depth, pending_multiline_move
 
-        return f"           {stripped}"
+        if re.match(r"^88\s+", upper):
+            return f"          {stripped}", evaluate_depth, False
+
+        if upper.startswith("EVALUATE "):
+            return f"           {stripped.rstrip('.')}", evaluate_depth + 1, False
+
+        if upper.startswith("WHEN "):
+            return f"               {stripped}", evaluate_depth, False
+
+        if upper.startswith("END-EVALUATE"):
+            new_depth = max(evaluate_depth - 1, 0)
+            return "           END-EVALUATE.", new_depth, False
+
+        if pending_multiline_move:
+            if upper.startswith("TO "):
+                return f"                {self._ensure_period(stripped)}", evaluate_depth, False
+
+            return f"                {stripped}", evaluate_depth, pending_multiline_move
+
+        if evaluate_depth > 0:
+            if upper.startswith(("SET ", "DISPLAY ", "PERFORM ", "CONTINUE")):
+                return f"                   {self._ensure_period(stripped)}", evaluate_depth, False
+
+            return f"                   {stripped}", evaluate_depth, False
+
+        if upper.startswith("MOVE "):
+            if " TO " in upper:
+                return f"           {self._ensure_period(stripped)}", evaluate_depth, False
+
+            return f"           {stripped}", evaluate_depth, True
+
+        if self._is_generated_statement_requiring_period(upper):
+            return f"           {self._ensure_period(stripped)}", evaluate_depth, False
+
+        return f"           {stripped}", evaluate_depth, pending_multiline_move
 
     def _is_division_or_section_header(
         self,
@@ -526,9 +819,36 @@ class CobolTransformer:
         if upper.startswith(("IF", "ELSE", "END-IF", "MOVE", "PERFORM")):
             return False
 
-        return bool(
-            re.fullmatch(
-                r"[A-Z0-9-]+\.",
-                upper,
-            )
+        return bool(re.fullmatch(r"[A-Z0-9-]+\.", upper))
+
+    def _is_generated_statement_requiring_period(
+        self,
+        upper: str,
+    ) -> bool:
+        prefixes = (
+            "PERFORM ",
+            "DISPLAY ",
+            "CONTINUE",
+            "SET ",
+            "GOBACK",
+            "EXIT",
         )
+
+        return upper.startswith(prefixes)
+
+    def _ensure_period(
+        self,
+        text: str,
+    ) -> str:
+        stripped = text.rstrip()
+
+        if stripped.endswith("."):
+            return stripped
+
+        return stripped + "."
+
+    def _normalize_period_spacing(
+        self,
+        text: str,
+    ) -> str:
+        return re.sub(r"\s+\.", ".", text)
