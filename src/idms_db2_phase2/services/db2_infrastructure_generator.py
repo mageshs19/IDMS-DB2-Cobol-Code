@@ -6,24 +6,6 @@ from idms_db2_phase2.services.name_normalizer import NameNormalizer
 
 
 class Db2InfrastructureGenerator:
-    """
-    Adds production DB2 infrastructure to converted COBOL.
-
-    Adds:
-    - SQLERRWS include
-    - SQLCA include
-    - uploaded DCLGEN includes
-    - SQL-LOCATION
-    - cursor EOC flags
-    - cursor declarations
-
-    This generator is intentionally generic:
-    - no hardcoded program names
-    - no hardcoded DB2 table names
-    - no hardcoded cursor names
-    - no hardcoded business paragraph names
-    """
-
     DB2_BLOCK_MARKER = (
         "* DB2 SQLCA, SQL ERROR WORKING STORAGE, DCLGEN INCLUDES, AND CURSOR FLAGS"
     )
@@ -46,7 +28,7 @@ class Db2InfrastructureGenerator:
             )
             return cobol_text, messages
 
-        context = _Db2MappingContext(
+        context = Db2MappingContext(
             mapping_rows=mapping_rows,
             dclgen_columns=dclgen_columns,
         )
@@ -56,10 +38,8 @@ class Db2InfrastructureGenerator:
             context=context,
         )
 
-        include_names = context.dclgen_include_names()
-
         block = self._build_infrastructure_block(
-            include_names=include_names,
+            include_names=context.dclgen_include_names(),
             cursor_specs=cursor_specs,
         )
 
@@ -70,7 +50,7 @@ class Db2InfrastructureGenerator:
 
         if inserted:
             messages.append(
-                "DB2 infrastructure: inserted DB2 infrastructure after WORKING-STORAGE SECTION."
+                "DB2 infrastructure: inserted after WORKING-STORAGE SECTION."
             )
             messages.extend(
                 self._cursor_spec_messages(
@@ -86,7 +66,7 @@ class Db2InfrastructureGenerator:
 
         if inserted:
             messages.append(
-                "DB2 infrastructure: WORKING-STORAGE SECTION not found; inserted block before PROCEDURE DIVISION."
+                "DB2 infrastructure: WORKING-STORAGE SECTION not found; inserted before PROCEDURE DIVISION."
             )
             messages.extend(
                 self._cursor_spec_messages(
@@ -102,7 +82,7 @@ class Db2InfrastructureGenerator:
 
         if inserted:
             messages.append(
-                "DB2 infrastructure: inserted block after DATA DIVISION because WORKING-STORAGE and PROCEDURE DIVISION anchors were not found."
+                "DB2 infrastructure: inserted WORKING-STORAGE SECTION after DATA DIVISION."
             )
             messages.extend(
                 self._cursor_spec_messages(
@@ -112,7 +92,7 @@ class Db2InfrastructureGenerator:
             return text, messages
 
         messages.append(
-            "DB2 infrastructure: no DATA DIVISION, WORKING-STORAGE SECTION, or PROCEDURE DIVISION anchor found; inserted block at top."
+            "DB2 infrastructure: no DATA DIVISION, WORKING-STORAGE SECTION, or PROCEDURE DIVISION anchor found; inserted at top."
         )
         messages.extend(
             self._cursor_spec_messages(
@@ -125,7 +105,7 @@ class Db2InfrastructureGenerator:
     def _cursor_specs(
         self,
         operations: list[IdmsOperation],
-        context: "_Db2MappingContext",
+        context: "Db2MappingContext",
     ) -> list[dict[str, object]]:
         specs: list[dict[str, object]] = []
         seen_sets: set[str] = set()
@@ -580,7 +560,7 @@ class Db2InfrastructureGenerator:
         return output
 
 
-class _Db2MappingContext:
+class Db2MappingContext:
     def __init__(
         self,
         mapping_rows: list[SheetMappingRow],
@@ -684,33 +664,6 @@ class _Db2MappingContext:
         if dclgen_scores:
             return max(
                 dclgen_scores.items(),
-                key=lambda item: item[1],
-            )[0]
-
-        record_compact = NameNormalizer.compact(
-            NameNormalizer.remove_record_suffix(
-                record_name,
-            )
-        )
-
-        table_scores: dict[str, int] = {}
-
-        for table in self.dclgen_by_table.keys():
-            table_compact = NameNormalizer.compact(
-                table,
-            )
-
-            score = self._name_overlap_score(
-                record_compact,
-                table_compact,
-            )
-
-            if score > 0:
-                table_scores[table] = score
-
-        if table_scores:
-            return max(
-                table_scores.items(),
                 key=lambda item: item[1],
             )[0]
 
@@ -1204,38 +1157,3 @@ class _Db2MappingContext:
         return NameNormalizer.to_cobol(
             text,
         )
-
-    def _name_overlap_score(
-        self,
-        left: str,
-        right: str,
-    ) -> int:
-        if not left or not right:
-            return 0
-
-        left = NameNormalizer.compact(
-            left,
-        )
-        right = NameNormalizer.compact(
-            right,
-        )
-
-        if left in right or right in left:
-            return min(
-                len(left),
-                len(right),
-            )
-
-        best = 0
-
-        for size in range(3, min(len(left), len(right)) + 1):
-            for index in range(0, len(left) - size + 1):
-                token = left[index : index + size]
-
-                if token in right:
-                    best = max(
-                        best,
-                        size,
-                    )
-
-        return best

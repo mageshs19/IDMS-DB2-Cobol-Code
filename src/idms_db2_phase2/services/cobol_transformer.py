@@ -66,7 +66,6 @@ class CobolTransformer:
                         pending_close_set,
                     )
                 )
-
                 pending_close_set = ""
 
         converted = "\n".join(
@@ -177,11 +176,9 @@ class CobolTransformer:
             first_or_next = obtain_set_match.group(
                 1,
             ).upper()
-
             record = obtain_set_match.group(
                 2,
             ).upper()
-
             set_name = obtain_set_match.group(
                 3,
             ).upper()
@@ -207,7 +204,6 @@ class CobolTransformer:
                         set_name,
                     )
                 )
-
                 opened_set = set_name
 
             lines.extend(
@@ -244,7 +240,6 @@ class CobolTransformer:
                 )
                 or ""
             ).upper()
-
             set_name = find_first_match.group(
                 2,
             ).upper()
@@ -359,9 +354,7 @@ class CobolTransformer:
         cursor_name = self.sql_generator.cursor_name(
             set_name,
         )
-
         eoc_condition = f"{cursor_name}-EOC"
-
         rewritten: list[str] = []
 
         for line in lines:
@@ -384,7 +377,6 @@ class CobolTransformer:
         cursor_name = self.sql_generator.cursor_name(
             set_name,
         )
-
         eoc_condition = f"{cursor_name}-EOC"
 
         return bool(

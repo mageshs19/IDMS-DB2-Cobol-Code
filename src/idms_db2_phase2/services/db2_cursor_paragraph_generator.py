@@ -1,19 +1,11 @@
 import re
 
 from idms_db2_phase2.domain.models import DclgenColumn, IdmsOperation, SheetMappingRow
-from idms_db2_phase2.services.db2_infrastructure_generator import _Db2MappingContext
+from idms_db2_phase2.services.db2_infrastructure_generator import Db2MappingContext
 from idms_db2_phase2.services.name_normalizer import NameNormalizer
 
 
 class Db2CursorParagraphGenerator:
-    """
-    Generates generic DB2 OPEN/FETCH/CLOSE cursor paragraphs.
-
-    This class uses Sheet Mapping + DCLGEN to create real FETCH INTO host
-    variables. It avoids TODO FETCH paragraphs whenever DCLGEN columns can
-    be inferred from the child record or DB2 table.
-    """
-
     GENERATED_MARKER = "* DB2 GENERATED CURSOR OPEN FETCH CLOSE PARAGRAPHS"
 
     def __init__(
@@ -26,7 +18,7 @@ class Db2CursorParagraphGenerator:
         self.dclgen_columns = dclgen_columns
         self.operations = operations
         self.messages: list[str] = []
-        self.context = _Db2MappingContext(
+        self.context = Db2MappingContext(
             mapping_rows=mapping_rows,
             dclgen_columns=dclgen_columns,
         )
@@ -325,15 +317,6 @@ class Db2CursorParagraphGenerator:
         )
         updated = open_pattern.sub(
             f"PERFORM {open_paragraph}.",
-            updated,
-        )
-
-        fetch_pattern = re.compile(
-            rf"^\s*EXEC\s+SQL\s*\n\s*FETCH\s+{re.escape(cursor_name)}(?:.|\n)*?END-EXEC\.?\s*$",
-            flags=re.IGNORECASE | re.MULTILINE,
-        )
-        updated = fetch_pattern.sub(
-            f"PERFORM {fetch_paragraph}.",
             updated,
         )
 

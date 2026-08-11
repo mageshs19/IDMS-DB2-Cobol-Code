@@ -5,20 +5,6 @@ from idms_db2_phase2.services.name_normalizer import NameNormalizer
 
 
 class FieldReferenceRewriter:
-    """
-    Rewrites residual IDMS qualified field references into DB2 DCLGEN host references.
-
-    Example:
-        AM-CN-STOCK OF VMBEFF
-
-    Becomes:
-        DCLDZBEFFTV.AM-CNSTK-479BEFF
-
-    This rewriter is conservative:
-    - it rewrites qualified references FIELD OF RECORD and FIELD IN RECORD
-    - it avoids unqualified field replacement
-    """
-
     def __init__(
         self,
         mapping_rows: list[SheetMappingRow],
@@ -86,10 +72,6 @@ class FieldReferenceRewriter:
                 row.cobol_record_idms,
             )
 
-            source_field_candidates = self._source_field_candidates(
-                row,
-            )
-
             target = self._target_host_reference(
                 row,
             )
@@ -97,7 +79,9 @@ class FieldReferenceRewriter:
             if not source_record or not target:
                 continue
 
-            for source_field in source_field_candidates:
+            for source_field in self._source_field_candidates(
+                row,
+            ):
                 if not source_field:
                     continue
 
@@ -130,10 +114,12 @@ class FieldReferenceRewriter:
     ) -> list[str]:
         candidates: list[str] = []
 
-        for value in [
+        values = [
             row.cobol_zone,
             row.reference_field_name_copybook,
-        ]:
+        ]
+
+        for value in values:
             source = self._source_field_from_value(
                 value,
             )
