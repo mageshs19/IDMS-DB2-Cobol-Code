@@ -1,6 +1,12 @@
 from idms_db2_phase2.domain.models import ConversionInput, ConversionResult
 from idms_db2_phase2.services.cobol_formatter import CobolFormatter
 from idms_db2_phase2.services.cobol_transformer import CobolTransformer
+from idms_db2_phase2.services.db2_cursor_paragraph_generator import (
+    Db2CursorParagraphGenerator,
+)
+from idms_db2_phase2.services.db2_infrastructure_generator import (
+    Db2InfrastructureGenerator,
+)
 from idms_db2_phase2.services.field_reference_rewriter import FieldReferenceRewriter
 from idms_db2_phase2.services.pic_length_auto_fixer import PicLengthAutoFixer
 from idms_db2_phase2.services.production_validator import ProductionValidator
@@ -9,10 +15,11 @@ from idms_db2_phase2.services.validation_service import ValidationService
 
 
 class ConversionService:
-    def __init__(
-        self,
-    ) -> None:
+    def __init__(self) -> None:
         self.validation_service = ValidationService()
+        self.db2_infrastructure_generator = Db2InfrastructureGenerator()
+        self.production_validator = ProductionValidator()
+        self.formatter = CobolFormatter()
 
     def convert(
         self,
@@ -35,7 +42,7 @@ class ConversionService:
         )
 
         transformer = CobolTransformer(
-            sql_generator,
+            sql_generator=sql_generator,
         )
 
         converted_cobol, transform_messages, operations = transformer.transform(
@@ -47,17 +54,44 @@ class ConversionService:
             transform_messages,
         )
 
-        field_rewriter = FieldReferenceRewriter(
+        converted_cobol, infrastructure_messages = (
+            self.db2_infrastructure_generator.apply(
+                cobol_text=converted_cobol,
+                dclgen_columns=conversion_input.dclgen_columns,
+                operations=operations,
+                mapping_rows=conversion_input.sheet_mapping_rows,
+            )
+        )
+
+        validation_messages.extend(
+            infrastructure_messages,
+        )
+
+        cursor_generator = Db2CursorParagraphGenerator(
+            mapping_rows=conversion_input.sheet_mapping_rows,
+            dclgen_columns=conversion_input.dclgen_columns,
+            operations=operations,
+        )
+
+        converted_cobol, cursor_messages = cursor_generator.apply(
+            cobol_text=converted_cobol,
+        )
+
+        validation_messages.extend(
+            cursor_messages,
+        )
+
+        field_reference_rewriter = FieldReferenceRewriter(
             mapping_rows=conversion_input.sheet_mapping_rows,
             dclgen_columns=conversion_input.dclgen_columns,
         )
 
-        converted_cobol = field_rewriter.rewrite(
-            converted_cobol,
+        converted_cobol = field_reference_rewriter.rewrite(
+            text=converted_cobol,
         )
 
         validation_messages.extend(
-            field_rewriter.rewrite_messages,
+            field_reference_rewriter.rewrite_messages,
         )
 
         if conversion_input.auto_fix_pic_length_mismatches:
@@ -72,18 +106,18 @@ class ConversionService:
                 pic_length_auto_fixer.messages,
             )
 
-        formatter = CobolFormatter()
-
-        converted_cobol = formatter.format(
-            converted_cobol,
+        converted_cobol = self.formatter.format(
+            text=converted_cobol,
         )
 
-        production_validator = ProductionValidator()
+        if converted_cobol is None:
+            converted_cobol = ""
 
-        production_messages = production_validator.validate(
+        production_messages = self.production_validator.validate(
             source_cobol_text=conversion_input.idms_cobol_text,
             converted_cobol_text=converted_cobol,
             mapping_rows=conversion_input.sheet_mapping_rows,
+            dclgen_columns=conversion_input.dclgen_columns,
         )
 
         validation_messages.extend(

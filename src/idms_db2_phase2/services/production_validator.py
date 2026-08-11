@@ -1,6 +1,6 @@
 import re
 
-from idms_db2_phase2.domain.models import SheetMappingRow
+from idms_db2_phase2.domain.models import DclgenColumn, SheetMappingRow
 from idms_db2_phase2.services.name_normalizer import NameNormalizer
 
 
@@ -9,11 +9,12 @@ class ProductionValidator:
     Performs production-focused validation for generated DB2 COBOL.
 
     It detects:
-        - Undefined TODO host variables.
-        - Residual IDMS control logic.
-        - Residual IDMS record field references.
-        - Source-to-output PIC length mismatch in MOVE statements.
-        - Missing required DB2 constructs.
+    - Missing required DB2 constructs.
+    - Undefined TODO host variables.
+    - Generated DCLGEN host variables that do not exist in uploaded DCLGEN.
+    - Residual executable IDMS statements.
+    - Residual IDMS record references in PROCEDURE DIVISION.
+    - MOVE source-to-target numeric PIC length mismatch.
     """
 
     FORBIDDEN_EXECUTABLE_PATTERNS = [
@@ -38,13 +39,41 @@ class ProductionValidator:
         "END-EXEC",
     ]
 
+    HOST_REFERENCE_PATTERN = re.compile(
+        r":\s*(?P<group>DCL[A-Z0-9-]+)\s*\.\s*(?P<field>[A-Z][A-Z0-9-]*)",
+        flags=re.IGNORECASE,
+    )
+
+    DATA_FIELD_PATTERN = re.compile(
+        r"^\s*(?P<level>0[1-9]|[1-4][0-9]|66|77|88)\s+"
+        r"(?P<name>[A-Z][A-Z0-9-]*)\b"
+        r"(?P<rest>.*)$",
+        flags=re.IGNORECASE,
+    )
+
+    PIC_PATTERN = re.compile(
+        r"\bPIC(?:TURE)?\s+(?:IS\s+)?(?P<pic>S?9(?:$(?P<len>\d+)$)?)",
+        flags=re.IGNORECASE,
+    )
+
+    MOVE_PATTERN = re.compile(
+        r"\bMOVE\s+"
+        r"(?P<source>[A-Z][A-Z0-9-]*(?:\.[A-Z][A-Z0-9-]*)?)"
+        r"(?:\s+OF\s+[A-Z][A-Z0-9-]*)?"
+        r"\s+TO\s+"
+        r"(?P<target>[A-Z][A-Z0-9-]*(?:\.[A-Z][A-Z0-9-]*)?)\b",
+        flags=re.IGNORECASE,
+    )
+
     def validate(
         self,
         source_cobol_text: str,
         converted_cobol_text: str,
         mapping_rows: list[SheetMappingRow],
+        dclgen_columns: list[DclgenColumn] | None = None,
     ) -> list[str]:
         messages: list[str] = []
+        dclgen_columns = dclgen_columns or []
 
         self._validate_required_db2_tokens(
             converted_cobol_text=converted_cobol_text,
@@ -53,6 +82,12 @@ class ProductionValidator:
 
         self._validate_no_todo_host_variable(
             converted_cobol_text=converted_cobol_text,
+            messages=messages,
+        )
+
+        self._validate_generated_dclgen_host_variables(
+            converted_cobol_text=converted_cobol_text,
+            dclgen_columns=dclgen_columns,
             messages=messages,
         )
 
@@ -93,10 +128,115 @@ class ProductionValidator:
         converted_cobol_text: str,
         messages: list[str],
     ) -> None:
-        if ":TODO-HOST-VARIABLE" in converted_cobol_text.upper():
+        upper = converted_cobol_text.upper()
+
+        if ":TODO-HOST-VARIABLE" in upper or ": TODO-HOST-VARIABLE" in upper:
             messages.append(
                 "Production validation: generated COBOL still contains :TODO-HOST-VARIABLE."
             )
+
+        if "TODO DB2" in upper:
+            messages.append(
+                "Production validation: generated COBOL still contains TODO DB2 items."
+            )
+
+    def _validate_generated_dclgen_host_variables(
+        self,
+        converted_cobol_text: str,
+        dclgen_columns: list[DclgenColumn],
+        messages: list[str],
+    ) -> None:
+        generated_hosts = self._generated_dclgen_host_references(
+            converted_cobol_text,
+        )
+
+        if not generated_hosts:
+            return
+
+        valid_hosts = self._valid_dclgen_host_references(
+            dclgen_columns,
+        )
+
+        if not valid_hosts:
+            messages.append(
+                "Production validation: generated COBOL contains DCLGEN host variables, but no DCLGEN host variables were parsed from uploaded DCLGEN files."
+            )
+            return
+
+        missing_hosts = sorted(
+            host for host in generated_hosts if host not in valid_hosts
+        )
+
+        for host in missing_hosts:
+            messages.append(
+                f"Production validation: generated host variable :{host} was not found in uploaded DCLGEN columns."
+            )
+
+    def _generated_dclgen_host_references(
+        self,
+        converted_cobol_text: str,
+    ) -> set[str]:
+        output: set[str] = set()
+
+        for match in self.HOST_REFERENCE_PATTERN.finditer(
+            converted_cobol_text,
+        ):
+            group = NameNormalizer.to_cobol(
+                match.group("group"),
+            )
+            field = NameNormalizer.to_cobol(
+                match.group("field"),
+            )
+
+            if group and field:
+                output.add(
+                    f"{group}.{field}",
+                )
+
+        return output
+
+    def _valid_dclgen_host_references(
+        self,
+        dclgen_columns: list[DclgenColumn],
+    ) -> set[str]:
+        output: set[str] = set()
+
+        for column in dclgen_columns:
+            table = NameNormalizer.normalize(
+                column.table_name,
+            )
+            db2_column = NameNormalizer.normalize(
+                column.column_name,
+            )
+            cobol_host = NameNormalizer.to_cobol(
+                column.cobol_host_name or column.column_name,
+            )
+
+            if not cobol_host:
+                continue
+
+            if table:
+                group = f"DCL{NameNormalizer.to_cobol(table)}"
+
+                output.add(
+                    f"{group}.{cobol_host}",
+                )
+
+                if db2_column:
+                    output.add(
+                        f"{group}.{NameNormalizer.to_cobol(db2_column)}",
+                    )
+
+            if db2_column:
+                output.add(
+                    NameNormalizer.to_cobol(db2_column),
+                )
+
+            output.add(
+                cobol_host,
+            )
+
+        return output
 
     def _validate_forbidden_idms_patterns(
         self,
@@ -123,6 +263,10 @@ class ProductionValidator:
         mapping_rows: list[SheetMappingRow],
         messages: list[str],
     ) -> None:
+        procedure_text = self._procedure_division_text(
+            converted_cobol_text,
+        )
+
         record_names = {
             NameNormalizer.to_cobol(
                 row.cobol_record_idms,
@@ -132,41 +276,23 @@ class ProductionValidator:
         }
 
         record_names = {
-            record
-            for record in record_names
-            if record
+            record for record in record_names if record
         }
 
         if not record_names:
             return
 
-        record_pattern = "|".join(
-            re.escape(
-                record,
-            )
-            for record in sorted(
-                record_names,
-                key=len,
-                reverse=True,
-            )
-        )
+        for record in sorted(record_names):
+            pattern = rf"\b(?:OF|IN)\s+{re.escape(record)}\b"
 
-        pattern = rf"\b[A-Z][A-Z0-9-]*\s+(?:OF|IN)\s+(?:{record_pattern})\b"
-
-        matches = sorted(
-            set(
-                re.findall(
-                    pattern,
-                    converted_cobol_text,
-                    flags=re.IGNORECASE,
+            if re.search(
+                pattern,
+                procedure_text,
+                flags=re.IGNORECASE,
+            ):
+                messages.append(
+                    f"Production validation: residual IDMS qualified record reference remains in PROCEDURE DIVISION: {record}"
                 )
-            )
-        )
-
-        for match in matches:
-            messages.append(
-                f"Production validation: residual IDMS record reference remains: {match}"
-            )
 
     def _validate_move_pic_length_mismatch(
         self,
@@ -174,206 +300,99 @@ class ProductionValidator:
         converted_cobol_text: str,
         messages: list[str],
     ) -> None:
-        all_text = "\n".join(
-            [
-                source_cobol_text or "",
-                converted_cobol_text or "",
-            ]
+        field_lengths = self._numeric_pic_lengths(
+            "\n".join(
+                [
+                    source_cobol_text or "",
+                    converted_cobol_text or "",
+                ]
+            )
         )
 
-        pic_lengths = self._parse_pic_digit_lengths(
-            all_text,
-        )
-
-        if not pic_lengths:
+        if not field_lengths:
             return
 
-        move_pairs = self._parse_move_pairs(
-            all_text,
+        procedure_text = self._procedure_division_text(
+            converted_cobol_text,
         )
 
-        for source_name, target_name in move_pairs:
-            source_key = NameNormalizer.to_cobol(
-                source_name,
+        move_pairs = self._parse_move_pairs(
+            procedure_text,
+        )
+
+        for source, target in move_pairs:
+            source_key = self._field_key(
+                source,
+            )
+            target_key = self._field_key(
+                target,
             )
 
-            target_key = NameNormalizer.to_cobol(
-                target_name,
-            )
-
-            source_digits = pic_lengths.get(
+            source_len = field_lengths.get(
                 source_key,
             )
-
-            target_digits = pic_lengths.get(
+            target_len = field_lengths.get(
                 target_key,
             )
 
-            if source_digits is None or target_digits is None:
+            if source_len is None or target_len is None:
                 continue
 
-            if source_digits > target_digits:
+            if source_len > target_len:
                 messages.append(
-                    "Production validation: possible data truncation: "
-                    f"MOVE {source_key} PIC digits {source_digits} "
-                    f"TO {target_key} PIC digits {target_digits}."
+                    "Production validation: possible MOVE numeric PIC length mismatch: "
+                    f"{source_key} length {source_len} moved to {target_key} length {target_len}."
                 )
 
-    def _parse_pic_digit_lengths(
+    def _numeric_pic_lengths(
         self,
         text: str,
     ) -> dict[str, int]:
-        result: dict[str, int] = {}
+        output: dict[str, int] = {}
 
-        entries = self._collect_cobol_data_entries(
-            text,
-        )
-
-        for name, body in entries:
-            digits = self._pic_digits(
-                body,
-            )
-
-            if digits is None:
-                continue
-
-            result[
-                NameNormalizer.to_cobol(
-                    name,
-                )
-            ] = digits
-
-        return result
-
-    def _collect_cobol_data_entries(
-        self,
-        text: str,
-    ) -> list[tuple[str, str]]:
-        lines = text.splitlines()
-        entries: list[tuple[str, str]] = []
-        index = 0
-
-        start_pattern = re.compile(
-            r"^\s*(?:0[1-9]|[1-4][0-9]|77)\s+([A-Z][A-Z0-9-]*)\b(.*)$",
-            re.IGNORECASE,
-        )
-
-        while index < len(lines):
-            line = lines[index]
-            match = start_pattern.match(
+        for line in text.splitlines():
+            match = self.DATA_FIELD_PATTERN.search(
                 line,
             )
 
             if not match:
-                index += 1
                 continue
 
-            name = match.group(
-                1,
+            field_name = NameNormalizer.to_cobol(
+                match.group("name"),
             )
 
-            parts = [
-                match.group(
-                    2,
-                )
-                or ""
-            ]
+            rest = match.group("rest") or ""
 
-            lookahead = index + 1
-
-            while lookahead < len(lines):
-                next_line = lines[lookahead]
-                next_match = start_pattern.match(
-                    next_line,
-                )
-
-                if next_match:
-                    break
-
-                parts.append(
-                    next_line.strip(),
-                )
-
-                if "." in next_line:
-                    lookahead += 1
-                    break
-
-                lookahead += 1
-
-            body = " ".join(
-                parts,
+            pic_match = self.PIC_PATTERN.search(
+                rest,
             )
 
-            entries.append(
-                (
-                    name,
-                    body,
+            if not pic_match:
+                continue
+
+            length_text = pic_match.group("len")
+
+            if length_text:
+                output[field_name] = int(
+                    length_text,
+                )
+                continue
+
+            pic = pic_match.group("pic") or ""
+
+            digits = len(
+                re.findall(
+                    r"9",
+                    pic,
+                    flags=re.IGNORECASE,
                 )
             )
 
-            index = max(
-                lookahead,
-                index + 1,
-            )
+            if digits:
+                output[field_name] = digits
 
-        return entries
-
-    def _pic_digits(
-        self,
-        text: str,
-    ) -> int | None:
-        match = re.search(
-            r"\bPIC(?:TURE)?\s+(?:IS\s+)?([A-Z0-9()VXS+-]+)",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-        if not match:
-            return None
-
-        pic = match.group(
-            1,
-        ).upper()
-
-        if "X" in pic:
-            x_match = re.search(
-                r"X$(\d+)$",
-                pic,
-            )
-
-            if x_match:
-                return int(
-                    x_match.group(
-                        1,
-                    )
-                )
-
-            if pic == "X":
-                return 1
-
-            return None
-
-        total_digits = 0
-
-        for digit_match in re.finditer(
-            r"9(?:$(\d+)$)?",
-            pic,
-        ):
-            if digit_match.group(
-                1,
-            ):
-                total_digits += int(
-                    digit_match.group(
-                        1,
-                    )
-                )
-            else:
-                total_digits += 1
-
-        if total_digits:
-            return total_digits
-
-        return None
+        return output
 
     def _parse_move_pairs(
         self,
@@ -387,23 +406,34 @@ class ProductionValidator:
             text,
         )
 
-        for match in re.finditer(
-            r"\bMOVE\s+([A-Z0-9-]+)(?:\s+OF\s+[A-Z0-9-]+)?\s+TO\s+([A-Z0-9-]+)\b",
+        for match in self.MOVE_PATTERN.finditer(
             normalized,
-            flags=re.IGNORECASE,
         ):
             pairs.append(
                 (
-                    match.group(
-                        1,
-                    ),
-                    match.group(
-                        2,
-                    ),
+                    match.group("source"),
+                    match.group("target"),
                 )
             )
 
         return pairs
+
+    def _field_key(
+        self,
+        value: str,
+    ) -> str:
+        text = str(
+            value or "",
+        ).strip()
+
+        if "." in text:
+            text = text.split(
+                ".",
+            )[-1]
+
+        return NameNormalizer.to_cobol(
+            text,
+        )
 
     def _procedure_division_text(
         self,
