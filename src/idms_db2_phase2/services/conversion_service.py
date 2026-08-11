@@ -1,4 +1,5 @@
 from idms_db2_phase2.domain.models import ConversionInput, ConversionResult
+from idms_db2_phase2.services.cobol_formatter import CobolFormatter
 from idms_db2_phase2.services.cobol_transformer import CobolTransformer
 from idms_db2_phase2.services.field_reference_rewriter import FieldReferenceRewriter
 from idms_db2_phase2.services.pic_length_auto_fixer import PicLengthAutoFixer
@@ -70,6 +71,12 @@ class ConversionService:
             validation_messages.extend(
                 pic_length_auto_fixer.messages,
             )
+
+        formatter = CobolFormatter()
+
+        converted_cobol = formatter.format(
+            converted_cobol,
+        )
 
         production_validator = ProductionValidator()
 

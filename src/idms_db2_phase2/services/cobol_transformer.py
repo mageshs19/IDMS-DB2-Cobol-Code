@@ -749,7 +749,7 @@ class CobolTransformer:
             return f"      {stripped}", evaluate_depth, pending_multiline_move
 
         if re.match(r"^88\s+", upper):
-            return f"          {stripped}", evaluate_depth, False
+            return f"           {stripped}", evaluate_depth, False
 
         if upper.startswith("EVALUATE "):
             return f"           {stripped.rstrip('.')}", evaluate_depth + 1, False
@@ -781,6 +781,9 @@ class CobolTransformer:
 
         if self._is_generated_statement_requiring_period(upper):
             return f"           {self._ensure_period(stripped)}", evaluate_depth, False
+
+        if upper.startswith("END PROGRAM "):
+            return f"       {self._ensure_period(stripped)}", evaluate_depth, False
 
         return f"           {stripped}", evaluate_depth, pending_multiline_move
 
