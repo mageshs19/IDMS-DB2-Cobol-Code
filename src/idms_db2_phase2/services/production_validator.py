@@ -13,30 +13,49 @@ class ProductionValidator:
     - Undefined TODO host variables.
     - Generated DCLGEN host variables that do not exist in uploaded DCLGEN.
     - Residual executable IDMS statements.
+    - Residual IDMS declarative/control statements.
+    - Residual IDMS copy statements.
     - Residual IDMS record references in PROCEDURE DIVISION.
     - MOVE source-to-target numeric PIC length mismatch.
-    """
 
-    FORBIDDEN_EXECUTABLE_PATTERNS = [
-        r"^\s*BIND\b",
-        r"^\s*READY\b",
-        r"^\s*OBTAIN\b",
-        r"^\s*FIND\s+CURRENT\b",
-        r"^\s*FIND\s+FIRST\b",
-        r"^\s*STORE\b",
-        r"^\s*MODIFY\b",
-        r"^\s*ERASE\b",
-        r"^\s*CONNECT\b",
-        r"^\s*DISCONNECT\b",
-        r"^\s*PERFORM\s+[A-Z0-9-]*IDMS-STATUS\b",
-        r"^\s*PERFORM\s+[A-Z0-9-]*IDMS-ABORT\b",
-        r"^\s*USAGE-MODE\s+IS\s+UPDATE\b",
-    ]
+    This validator is sequence-number aware. It can validate both:
+    - unsequenced COBOL
+    - manual-style sequenced COBOL:
+        000010 COBOL STATEMENT 00010000
+    """
 
     REQUIRED_DB2_TOKENS = [
         "EXEC SQL",
         "SQLCA",
         "END-EXEC",
+    ]
+
+    FORBIDDEN_EXECUTABLE_PATTERNS = [
+        r"^BIND\b",
+        r"^READY\b",
+        r"^OBTAIN\b",
+        r"^FIND\s+CURRENT\b",
+        r"^FIND\s+FIRST\b",
+        r"^STORE\b",
+        r"^MODIFY\b",
+        r"^ERASE\b",
+        r"^CONNECT\b",
+        r"^DISCONNECT\b",
+        r"^PERFORM\s+[A-Z0-9-]*IDMS-STATUS\b",
+        r"^PERFORM\s+[A-Z0-9-]*IDMS-ABORT\b",
+        r"\bUSAGE-MODE\s+IS\s+UPDATE\b",
+        r"\bUSAGE-MODE\s+IS\s+RETRIEVAL\b",
+    ]
+
+    FORBIDDEN_IDMS_DECLARATIVE_PATTERNS = [
+        r"^IDMS-CONTROL\s+SECTION\b",
+        r"^PROTOCOL\b",
+        r"^IDMS-RECORDS\s+WITHIN\s+WORKING-STORAGE\s+SECTION\b",
+        r"^SCHEMA\s+SECTION\b",
+        r"^DB\s+[A-Z0-9-]+\s+WITHIN\s+[A-Z0-9-]+\b",
+        r"^COPY\s+IDMS\b",
+        r"^COPY\s+IDMS\s+IDMS-STATUS\b",
+        r"^COPY\s+IDMS\s+SUBSCHEMA-BINDS\b",
     ]
 
     HOST_REFERENCE_PATTERN = re.compile(
@@ -65,6 +84,16 @@ class ProductionValidator:
         flags=re.IGNORECASE,
     )
 
+    LEFT_SEQUENCE_PATTERN = re.compile(
+        r"^\s*\d{6}\s+(?P<body>.*)$",
+        flags=re.IGNORECASE,
+    )
+
+    RIGHT_SEQUENCE_PATTERN = re.compile(
+        r"(?P<body>.*?)(\s+\d{8})\s*$",
+        flags=re.IGNORECASE,
+    )
+
     def validate(
         self,
         source_cobol_text: str,
@@ -75,40 +104,111 @@ class ProductionValidator:
         messages: list[str] = []
         dclgen_columns = dclgen_columns or []
 
+        normalized_converted_text = self._normalized_validation_text(
+            converted_cobol_text,
+        )
+
         self._validate_required_db2_tokens(
-            converted_cobol_text=converted_cobol_text,
+            converted_cobol_text=normalized_converted_text,
             messages=messages,
         )
 
-        self._validate_no_todo_host_variable(
-            converted_cobol_text=converted_cobol_text,
+        self._validate_no_todo_or_generated_error(
+            converted_cobol_text=normalized_converted_text,
             messages=messages,
         )
 
         self._validate_generated_dclgen_host_variables(
-            converted_cobol_text=converted_cobol_text,
+            converted_cobol_text=normalized_converted_text,
             dclgen_columns=dclgen_columns,
             messages=messages,
         )
 
         self._validate_forbidden_idms_patterns(
-            converted_cobol_text=converted_cobol_text,
+            converted_cobol_text=normalized_converted_text,
+            messages=messages,
+        )
+
+        self._validate_forbidden_idms_declaratives(
+            converted_cobol_text=normalized_converted_text,
             messages=messages,
         )
 
         self._validate_residual_idms_record_references(
-            converted_cobol_text=converted_cobol_text,
+            converted_cobol_text=normalized_converted_text,
             mapping_rows=mapping_rows,
             messages=messages,
         )
 
         self._validate_move_pic_length_mismatch(
             source_cobol_text=source_cobol_text,
-            converted_cobol_text=converted_cobol_text,
+            converted_cobol_text=normalized_converted_text,
             messages=messages,
         )
 
         return messages
+
+    def _normalized_validation_text(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Removes manual sequence numbers from each line before validation.
+
+        Example:
+            001870 BIND RUN-UNIT 01870000
+
+        becomes:
+            BIND RUN-UNIT
+        """
+        output_lines: list[str] = []
+
+        for line in (text or "").splitlines():
+            output_lines.append(
+                self._logical_line(
+                    line,
+                )
+            )
+
+        return "\n".join(
+            output_lines,
+        )
+
+    def _logical_line(
+        self,
+        line: str,
+    ) -> str:
+        text = str(line or "").rstrip()
+
+        right_match = self.RIGHT_SEQUENCE_PATTERN.match(
+            text,
+        )
+
+        if right_match:
+            text = right_match.group("body").rstrip()
+
+        left_match = self.LEFT_SEQUENCE_PATTERN.match(
+            text,
+        )
+
+        if left_match:
+            text = left_match.group("body").strip()
+
+        return text.strip()
+
+    def _is_comment_or_blank(
+        self,
+        line: str,
+    ) -> bool:
+        stripped = str(line or "").strip()
+
+        if not stripped:
+            return True
+
+        if stripped.startswith("*"):
+            return True
+
+        return False
 
     def _validate_required_db2_tokens(
         self,
@@ -123,21 +223,36 @@ class ProductionValidator:
                     f"Production validation: required DB2 token missing: {token}"
                 )
 
-    def _validate_no_todo_host_variable(
+    def _validate_no_todo_or_generated_error(
         self,
         converted_cobol_text: str,
         messages: list[str],
     ) -> None:
         upper = converted_cobol_text.upper()
 
-        if ":TODO-HOST-VARIABLE" in upper or ": TODO-HOST-VARIABLE" in upper:
+        if ": TODO-HOST-VARIABLE" in upper:
             messages.append(
-                "Production validation: generated COBOL still contains :TODO-HOST-VARIABLE."
+                "Production validation: generated COBOL still contains : TODO-HOST-VARIABLE."
             )
 
         if "TODO DB2" in upper:
             messages.append(
                 "Production validation: generated COBOL still contains TODO DB2 items."
+            )
+
+        if "ERROR DB2:" in upper:
+            messages.append(
+                "Production validation: generated COBOL still contains ERROR DB2 items. Check missing DB2 table, column, cursor, or host-variable mapping."
+            )
+
+        if "UNABLE TO DECLARE CURSOR" in upper:
+            messages.append(
+                "Production validation: cursor declaration could not be generated. Check Sheet Mapping relation/FK rows and DCLGEN columns."
+            )
+
+        if "NO FETCH HOST VARIABLES MAPPED" in upper:
+            messages.append(
+                "Production validation: cursor FETCH host variables could not be generated. Check DCLGEN host variables and Sheet Mapping DB2 columns."
             )
 
     def _validate_generated_dclgen_host_variables(
@@ -247,15 +362,60 @@ class ProductionValidator:
             converted_cobol_text,
         )
 
-        for pattern in self.FORBIDDEN_EXECUTABLE_PATTERNS:
-            if re.search(
-                pattern,
-                executable_text,
-                flags=re.IGNORECASE | re.MULTILINE,
+        for line_number, line in enumerate(
+            executable_text.splitlines(),
+            start=1,
+        ):
+            logical = self._logical_line(
+                line,
+            )
+
+            if self._is_comment_or_blank(
+                logical,
             ):
-                messages.append(
-                    f"Production validation: residual IDMS executable pattern remains: {pattern}"
-                )
+                continue
+
+            for pattern in self.FORBIDDEN_EXECUTABLE_PATTERNS:
+                if re.search(
+                    pattern,
+                    logical,
+                    flags=re.IGNORECASE,
+                ):
+                    messages.append(
+                        "Production validation: residual executable IDMS statement remains "
+                        f"near PROCEDURE line {line_number}: {logical}"
+                    )
+                    break
+
+    def _validate_forbidden_idms_declaratives(
+        self,
+        converted_cobol_text: str,
+        messages: list[str],
+    ) -> None:
+        for line_number, line in enumerate(
+            converted_cobol_text.splitlines(),
+            start=1,
+        ):
+            logical = self._logical_line(
+                line,
+            )
+
+            if self._is_comment_or_blank(
+                logical,
+            ):
+                continue
+
+            for pattern in self.FORBIDDEN_IDMS_DECLARATIVE_PATTERNS:
+                if re.search(
+                    pattern,
+                    logical,
+                    flags=re.IGNORECASE,
+                ):
+                    messages.append(
+                        "Production validation: residual IDMS declarative/control statement remains "
+                        f"near line {line_number}: {logical}"
+                    )
+                    break
 
     def _validate_residual_idms_record_references(
         self,
@@ -291,7 +451,8 @@ class ProductionValidator:
                 flags=re.IGNORECASE,
             ):
                 messages.append(
-                    f"Production validation: residual IDMS qualified record reference remains in PROCEDURE DIVISION: {record}"
+                    "Production validation: residual IDMS qualified record reference remains "
+                    f"in PROCEDURE DIVISION: {record}"
                 )
 
     def _validate_move_pic_length_mismatch(
@@ -312,12 +473,8 @@ class ProductionValidator:
         if not field_lengths:
             return
 
-        procedure_text = self._procedure_division_text(
-            converted_cobol_text,
-        )
-
         move_pairs = self._parse_move_pairs(
-            procedure_text,
+            converted_cobol_text,
         )
 
         for source, target in move_pairs:
@@ -328,20 +485,21 @@ class ProductionValidator:
                 target,
             )
 
-            source_len = field_lengths.get(
+            source_digits = field_lengths.get(
                 source_key,
             )
-            target_len = field_lengths.get(
+            target_digits = field_lengths.get(
                 target_key,
             )
 
-            if source_len is None or target_len is None:
+            if not source_digits or not target_digits:
                 continue
 
-            if source_len > target_len:
+            if source_digits > target_digits:
                 messages.append(
-                    "Production validation: possible MOVE numeric PIC length mismatch: "
-                    f"{source_key} length {source_len} moved to {target_key} length {target_len}."
+                    "Production validation: possible numeric PIC length mismatch. "
+                    f"MOVE source {source_key} has {source_digits} digit(s), "
+                    f"target {target_key} has {target_digits} digit(s)."
                 )
 
     def _numeric_pic_lengths(
@@ -350,18 +508,21 @@ class ProductionValidator:
     ) -> dict[str, int]:
         output: dict[str, int] = {}
 
-        for line in text.splitlines():
-            match = self.DATA_FIELD_PATTERN.search(
+        for line in (text or "").splitlines():
+            logical = self._logical_line(
                 line,
+            )
+
+            match = self.DATA_FIELD_PATTERN.match(
+                logical,
             )
 
             if not match:
                 continue
 
-            field_name = NameNormalizer.to_cobol(
+            name = self._field_key(
                 match.group("name"),
             )
-
             rest = match.group("rest") or ""
 
             pic_match = self.PIC_PATTERN.search(
@@ -371,26 +532,24 @@ class ProductionValidator:
             if not pic_match:
                 continue
 
-            length_text = pic_match.group("len")
+            pic = pic_match.group("pic") or ""
+            explicit_length = pic_match.group("len")
 
-            if length_text:
-                output[field_name] = int(
-                    length_text,
-                )
+            if explicit_length:
+                try:
+                    output[name] = int(
+                        explicit_length,
+                    )
+                except ValueError:
+                    continue
                 continue
 
-            pic = pic_match.group("pic") or ""
-
-            digits = len(
-                re.findall(
-                    r"9",
-                    pic,
-                    flags=re.IGNORECASE,
-                )
+            digits = pic.count(
+                "9",
             )
 
             if digits:
-                output[field_name] = digits
+                output[name] = digits
 
         return output
 
@@ -403,7 +562,7 @@ class ProductionValidator:
         normalized = re.sub(
             r"\s+",
             " ",
-            text,
+            text or "",
         )
 
         for match in self.MOVE_PATTERN.finditer(
@@ -440,14 +599,14 @@ class ProductionValidator:
         text: str,
     ) -> str:
         match = re.search(
-            r"^\s*PROCEDURE\s+DIVISION\.",
-            text,
+            r"^\s*PROCEDURE\s+DIVISION\b.*\.\s*$",
+            text or "",
             flags=re.IGNORECASE | re.MULTILINE,
         )
 
         if not match:
-            return text
+            return text or ""
 
-        return text[
+        return (text or "")[
             match.start() :
         ]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 
 
@@ -5,38 +7,192 @@ class CobolFormatter:
     """
     Final COBOL formatting pass.
 
-    This class does not change business logic.
+    Scope:
+    - Formatting only.
+    - No IDMS-to-DB2 logic.
+    - No field-name rewrite.
+    - No table-name rewrite.
+    - No DCLGEN name rewrite.
+    - No business-rule changes.
 
-    It normalizes:
-    - indentation
-    - generated statement periods
-    - 88-level indentation
-    - IF / ELSE / END-IF indentation
-    - EVALUATE / WHEN / END-EVALUATE indentation
-    - END PROGRAM indentation
-    - multiline MOVE formatting
-    - generated SQL-LOCATION statements
-    - SQL-ERROR paragraph fallback body
-    - blank lines between paragraphs
-    - blank lines inside EXEC SQL blocks
+    Responsibilities:
+    - Preserve COBOL comments.
+    - Format DATA DIVISION level indentation.
+    - Format EXEC SQL indentation.
+    - Format PROCEDURE DIVISION IF / ELSE / END-IF indentation.
+    - Format EVALUATE / WHEN / END-EVALUATE indentation.
+    - Preserve generated names exactly.
 
-    It preserves:
-    - comments
-    - author details
-    - date-written details
-    - remarks
-    - business-rule comments
-    - paragraph names
-    - section names
+    Important fix:
+    - END-IF. and END-EVALUATE. must not be treated as paragraph names.
+      Control-flow keywords are handled before paragraph detection.
     """
 
-    COMMENT_INDENT = "      "
-    PARAGRAPH_INDENT = "       "
-    BASE_INDENT = "           "
-    INDENT_STEP = "    "
-    SQL_INDENT = "                "
-    SQL_CONTINUATION_INDENT = "                    "
-    MOVE_TO_INDENT = "                "
+    LEFT_SEQUENCE_PATTERN = re.compile(
+        r"^\s*(?P<left>\d{6})\s+"
+        r"(?P<body>.*?)"
+        r"(?:\s+(?P<right>\d{8}))?\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    RIGHT_SEQUENCE_PATTERN = re.compile(
+        r"(?P<body>.*?)(?:\s+(?P<right>\d{8}))\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    SEQUENCE_ONLY_PATTERN = re.compile(
+        r"^\s*(\d{6}|\d{8})\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    DIVISION_PATTERN = re.compile(
+        r"^\s*(IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE)\s+DIVISION\b.*$",
+        flags=re.IGNORECASE,
+    )
+
+    SECTION_PATTERN = re.compile(
+        r"^\s*[A-Z0-9-]+\s+SECTION\.\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    EXEC_SQL_PATTERN = re.compile(
+        r"^\s*EXEC\s+SQL\b",
+        flags=re.IGNORECASE,
+    )
+
+    END_EXEC_PATTERN = re.compile(
+        r"^\s*END-EXEC\.?\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    DATA_LEVEL_PATTERN = re.compile(
+        r"^\s*(?P<level>0[1-9]|[1-4][0-9]|66|77|88)\s+"
+        r"(?P<rest>.*)$",
+        flags=re.IGNORECASE,
+    )
+
+    FILE_DESCRIPTOR_PATTERN = re.compile(
+        r"^\s*(FD|SD)\s+",
+        flags=re.IGNORECASE,
+    )
+
+    SELECT_FILE_PATTERN = re.compile(
+        r"^\s*SELECT\s+",
+        flags=re.IGNORECASE,
+    )
+
+    PARAGRAPH_PATTERN = re.compile(
+        r"^\s*(?P<name>[A-Z0-9][A-Z0-9-]*)\.\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    COMMENT_PATTERN = re.compile(
+        r"^\s*\*",
+        flags=re.IGNORECASE,
+    )
+
+    PAGE_EJECT_PATTERN = re.compile(
+        r"^\s*/\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    SQL_KEYWORDS_ZERO_INDENT = (
+        "EXEC SQL",
+        "END-EXEC",
+    )
+
+    SQL_KEYWORDS_LEVEL_1 = (
+        "INCLUDE ",
+        "DECLARE ",
+        "SELECT",
+        "INTO",
+        "FROM ",
+        "WHERE",
+        "ORDER BY",
+        "GROUP BY",
+        "HAVING",
+        "FETCH ",
+        "OPEN ",
+        "CLOSE ",
+        "COMMIT",
+        "ROLLBACK",
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "SET ",
+        "VALUES",
+        "FOR READ ONLY",
+    )
+
+    SQL_KEYWORDS_LEVEL_2 = (
+        "AND ",
+        "OR ",
+    )
+
+    NON_PARAGRAPH_SINGLE_WORDS = {
+        "ACCEPT",
+        "ADD",
+        "ALTER",
+        "CALL",
+        "CANCEL",
+        "CLOSE",
+        "COMMIT",
+        "COMPUTE",
+        "CONTINUE",
+        "DELETE",
+        "DISPLAY",
+        "DIVIDE",
+        "ELSE",
+        "END",
+        "END-ADD",
+        "END-CALL",
+        "END-COMPUTE",
+        "END-DELETE",
+        "END-DIVIDE",
+        "END-EVALUATE",
+        "END-EXEC",
+        "END-IF",
+        "END-MULTIPLY",
+        "END-PERFORM",
+        "END-READ",
+        "END-RETURN",
+        "END-REWRITE",
+        "END-SEARCH",
+        "END-START",
+        "END-STRING",
+        "END-SUBTRACT",
+        "END-UNSTRING",
+        "END-WRITE",
+        "ENTRY",
+        "EVALUATE",
+        "EXEC",
+        "EXIT",
+        "FETCH",
+        "GOBACK",
+        "GO",
+        "IF",
+        "INITIALIZE",
+        "INSPECT",
+        "MOVE",
+        "MULTIPLY",
+        "NEXT",
+        "OPEN",
+        "PERFORM",
+        "READ",
+        "RETURN",
+        "REWRITE",
+        "ROLLBACK",
+        "SEARCH",
+        "SET",
+        "SORT",
+        "START",
+        "STOP",
+        "STRING",
+        "SUBTRACT",
+        "UNSTRING",
+        "WHEN",
+        "WRITE",
+    }
 
     def format(
         self,
@@ -45,800 +201,505 @@ class CobolFormatter:
         if not text:
             return ""
 
-        text = self._normalize_line_endings(
+        normalized_text = self._normalize_line_endings(
             text,
         )
 
-        text = self._repair_broken_multiline_move(
-            text,
-        )
-
-        text = self._remove_redundant_generated_continue(
-            text,
-        )
-
-        text = self._pre_normalize_known_generated_lines(
-            text,
-        )
-
-        lines = text.splitlines()
-        output: list[str] = []
-
+        output_lines: list[str] = []
+        current_division = ""
         in_exec_sql = False
-        if_depth = 0
-        evaluate_stack: list[int] = []
-        pending_multiline_move = False
+        data_level_stack: list[int] = []
+        procedure_indent = 0
+        evaluate_depth = 0
 
-        for raw_line in lines:
-            stripped = raw_line.strip()
+        for raw_line in normalized_text.splitlines():
+            left_sequence, body, right_sequence = self._split_sequence(
+                raw_line,
+            )
 
-            if not stripped:
-                if in_exec_sql:
-                    continue
-
-                if evaluate_stack:
-                    continue
-
-                output.append("")
+            if not body.strip():
+                output_lines.append("")
                 continue
 
+            stripped = body.strip()
             upper = stripped.upper()
 
-            if upper.startswith("EXEC SQL"):
-                in_exec_sql = True
-                output.append(
-                    f"{self.BASE_INDENT}EXEC SQL",
-                )
-                continue
+            detected_division = self._detect_division(
+                stripped,
+            )
 
-            if upper.startswith("END-EXEC"):
+            if detected_division:
+                current_division = detected_division
                 in_exec_sql = False
-                output.append(
-                    f"{self.BASE_INDENT}END-EXEC.",
-                )
-                continue
+                data_level_stack = []
+                procedure_indent = 0
+                evaluate_depth = 0
 
-            if in_exec_sql:
-                output.append(
-                    self._format_sql_line(
-                        stripped,
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=stripped,
+                        right_sequence=right_sequence,
                     )
                 )
                 continue
 
-            (
-                formatted_line,
-                if_depth,
-                evaluate_stack,
-                pending_multiline_move,
-            ) = self._format_cobol_line(
-                stripped=stripped,
-                if_depth=if_depth,
-                evaluate_stack=evaluate_stack,
-                pending_multiline_move=pending_multiline_move,
+            if self.EXEC_SQL_PATTERN.match(stripped):
+                in_exec_sql = True
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=self._format_exec_sql_line(stripped),
+                        right_sequence=right_sequence,
+                    )
+                )
+                continue
+
+            if in_exec_sql:
+                formatted_sql_line = self._format_exec_sql_line(
+                    stripped,
+                )
+
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=formatted_sql_line,
+                        right_sequence=right_sequence,
+                    )
+                )
+
+                if self.END_EXEC_PATTERN.match(stripped):
+                    in_exec_sql = False
+
+                continue
+
+            if self._is_comment_or_page_eject(stripped):
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=self._format_comment_or_page_eject(stripped),
+                        right_sequence=right_sequence,
+                    )
+                )
+                continue
+
+            if self.SECTION_PATTERN.match(stripped):
+                data_level_stack = []
+
+                if upper == "PROCEDURE DIVISION.":
+                    current_division = "PROCEDURE"
+
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=stripped,
+                        right_sequence=right_sequence,
+                    )
+                )
+                continue
+
+            if current_division == "DATA":
+                formatted_body = self._format_data_division_line(
+                    stripped=stripped,
+                    data_level_stack=data_level_stack,
+                )
+
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=formatted_body,
+                        right_sequence=right_sequence,
+                    )
+                )
+                continue
+
+            if current_division == "ENVIRONMENT":
+                formatted_body = self._format_environment_line(
+                    stripped,
+                )
+
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=formatted_body,
+                        right_sequence=right_sequence,
+                    )
+                )
+                continue
+
+            if current_division == "PROCEDURE":
+                formatted_body, procedure_indent, evaluate_depth = (
+                    self._format_procedure_line(
+                        stripped=stripped,
+                        procedure_indent=procedure_indent,
+                        evaluate_depth=evaluate_depth,
+                    )
+                )
+
+                output_lines.append(
+                    self._rebuild_line(
+                        left_sequence=left_sequence,
+                        body=formatted_body,
+                        right_sequence=right_sequence,
+                    )
+                )
+                continue
+
+            output_lines.append(
+                self._rebuild_line(
+                    left_sequence=left_sequence,
+                    body=stripped,
+                    right_sequence=right_sequence,
+                )
             )
 
-            output.append(
-                formatted_line,
-            )
-
-        formatted = "\n".join(
-            output,
-        )
-
-        formatted = self._remove_blank_lines_inside_exec_sql(
-            formatted,
-        )
-
-        formatted = self._remove_blank_lines_before_end_exec(
-            formatted,
-        )
-
-        formatted = self._remove_blank_lines_before_end_evaluate(
-            formatted,
-        )
-
-        formatted = self._post_fix_end_evaluate_indentation(
-            formatted,
-        )
-
-        formatted = self._post_fix_multiline_move_indentation(
-            formatted,
-        )
-
-        formatted = self._normalize_program_id_case(
-            formatted,
-        )
-
-        formatted = self._post_fix_paragraph_spacing(
-            formatted,
-        )
-
-        formatted = self._post_fix_division_spacing(
-            formatted,
-        )
-
-        formatted = self._normalize_period_spacing(
-            formatted,
-        )
-
-        formatted = self._ensure_sql_error_continue(
-            formatted,
-        )
-
+        formatted = "\n".join(output_lines)
         formatted = self._normalize_blank_lines(
             formatted,
         )
 
-        return formatted.strip() + "\n"
+        return formatted.rstrip() + "\n"
 
+    #
+    # Split / rebuild
+    #
+    def _split_sequence(
+        self,
+        line: str,
+    ) -> tuple[str, str, str]:
+        text = str(line or "").rstrip()
+
+        if self.SEQUENCE_ONLY_PATTERN.fullmatch(
+            text,
+        ):
+            return "", "", ""
+
+        left_match = self.LEFT_SEQUENCE_PATTERN.match(
+            text,
+        )
+
+        if left_match:
+            left_sequence = left_match.group("left") or ""
+            body = left_match.group("body") or ""
+            right_sequence = left_match.group("right") or ""
+
+            return left_sequence, body.rstrip(), right_sequence
+
+        right_match = self.RIGHT_SEQUENCE_PATTERN.match(
+            text,
+        )
+
+        if right_match:
+            body = right_match.group("body") or ""
+            right_sequence = right_match.group("right") or ""
+
+            if right_sequence and not body.strip().isdigit():
+                return "", body.rstrip(), right_sequence
+
+        return "", text, ""
+
+    def _rebuild_line(
+        self,
+        left_sequence: str,
+        body: str,
+        right_sequence: str,
+    ) -> str:
+        clean_body = str(body or "").rstrip()
+
+        if left_sequence and right_sequence:
+            return f"{left_sequence} {clean_body} {right_sequence}".rstrip()
+
+        if left_sequence:
+            return f"{left_sequence} {clean_body}".rstrip()
+
+        if right_sequence:
+            return f"{clean_body} {right_sequence}".rstrip()
+
+        return clean_body
+
+    #
+    # Division detection
+    #
+    def _detect_division(
+        self,
+        body: str,
+    ) -> str:
+        match = self.DIVISION_PATTERN.match(
+            body,
+        )
+
+        if not match:
+            return ""
+
+        return match.group(1).upper()
+
+    #
+    # Comments
+    #
+    def _is_comment_or_page_eject(
+        self,
+        stripped: str,
+    ) -> bool:
+        return bool(
+            self.COMMENT_PATTERN.match(stripped)
+            or self.PAGE_EJECT_PATTERN.match(stripped)
+        )
+
+    def _format_comment_or_page_eject(
+        self,
+        stripped: str,
+    ) -> str:
+        if self.PAGE_EJECT_PATTERN.match(
+            stripped,
+        ):
+            return "/"
+
+        return stripped
+
+    #
+    # EXEC SQL formatting
+    #
+    def _format_exec_sql_line(
+        self,
+        stripped: str,
+    ) -> str:
+        upper = stripped.upper()
+
+        if upper.startswith(
+            self.SQL_KEYWORDS_ZERO_INDENT,
+        ):
+            return stripped
+
+        if upper.startswith(
+            self.SQL_KEYWORDS_LEVEL_2,
+        ):
+            return "        " + stripped
+
+        if upper.startswith(
+            self.SQL_KEYWORDS_LEVEL_1,
+        ):
+            return "    " + stripped
+
+        if stripped.startswith(":"):
+            return "        " + stripped
+
+        if stripped.startswith(","):
+            return "        " + stripped
+
+        if stripped.endswith(","):
+            return "        " + stripped
+
+        return "        " + stripped
+
+    #
+    # ENVIRONMENT formatting
+    #
+    def _format_environment_line(
+        self,
+        stripped: str,
+    ) -> str:
+        upper = stripped.upper()
+
+        if self.SELECT_FILE_PATTERN.match(
+            stripped,
+        ):
+            return "    " + stripped
+
+        if upper.startswith("ASSIGN "):
+            return "        " + stripped
+
+        return stripped
+
+    #
+    # DATA formatting
+    #
+    def _format_data_division_line(
+        self,
+        stripped: str,
+        data_level_stack: list[int],
+    ) -> str:
+        upper = stripped.upper()
+
+        if self.FILE_DESCRIPTOR_PATTERN.match(
+            stripped,
+        ):
+            return stripped
+
+        if upper.startswith(
+            (
+                "BLOCK ",
+                "RECORD ",
+                "RECORDING ",
+                "LABEL ",
+                "DATA ",
+                "VALUE ",
+            )
+        ):
+            return "    " + stripped
+
+        level_match = self.DATA_LEVEL_PATTERN.match(
+            stripped,
+        )
+
+        if not level_match:
+            return stripped
+
+        level_text = level_match.group("level")
+        rest = level_match.group("rest").strip()
+
+        try:
+            level = int(level_text)
+        except ValueError:
+            level = 1
+
+        if level in {1, 77}:
+            data_level_stack.clear()
+            data_level_stack.append(
+                level,
+            )
+            indent = 0
+
+        elif level == 88:
+            indent = max(
+                4,
+                len(data_level_stack) * 4,
+            )
+
+        else:
+            while data_level_stack and data_level_stack[-1] >= level:
+                data_level_stack.pop()
+
+            indent = len(data_level_stack) * 4
+            data_level_stack.append(
+                level,
+            )
+
+        return " " * indent + f"{level_text}  {rest}"
+
+    #
+    # PROCEDURE formatting
+    #
+    def _format_procedure_line(
+        self,
+        stripped: str,
+        procedure_indent: int,
+        evaluate_depth: int,
+    ) -> tuple[str, int, int]:
+        upper = stripped.upper()
+
+        #
+        # Critical ordering:
+        # END-IF. and END-EVALUATE. must be processed before paragraph
+        # detection. Otherwise they look like single-word paragraph names
+        # and reset indentation incorrectly.
+        #
+        if upper.startswith("END-EVALUATE"):
+            procedure_indent = max(
+                0,
+                procedure_indent - 4,
+            )
+            evaluate_depth = max(
+                0,
+                evaluate_depth - 1,
+            )
+
+            return (
+                " " * procedure_indent + stripped,
+                procedure_indent,
+                evaluate_depth,
+            )
+
+        if upper.startswith("END-IF"):
+            procedure_indent = max(
+                0,
+                procedure_indent - 4,
+            )
+
+            return (
+                " " * procedure_indent + stripped,
+                procedure_indent,
+                evaluate_depth,
+            )
+
+        if upper.startswith("ELSE"):
+            procedure_indent = max(
+                0,
+                procedure_indent - 4,
+            )
+            formatted = " " * procedure_indent + stripped
+            procedure_indent += 4
+
+            return formatted, procedure_indent, evaluate_depth
+
+        if upper.startswith("WHEN "):
+            when_indent = max(
+                0,
+                procedure_indent - 4,
+            )
+            formatted = " " * when_indent + stripped
+
+            return formatted, procedure_indent, evaluate_depth
+
+        if self._is_procedure_paragraph(
+            stripped,
+        ):
+            return stripped, 0, 0
+
+        formatted = " " * procedure_indent + stripped
+
+        if upper.startswith("IF "):
+            procedure_indent += 4
+
+        elif upper.startswith("EVALUATE "):
+            procedure_indent += 4
+            evaluate_depth += 1
+
+        return formatted, procedure_indent, evaluate_depth
+
+    def _is_procedure_paragraph(
+        self,
+        stripped: str,
+    ) -> bool:
+        match = self.PARAGRAPH_PATTERN.match(
+            stripped,
+        )
+
+        if not match:
+            return False
+
+        name = match.group("name").upper()
+
+        if name in self.NON_PARAGRAPH_SINGLE_WORDS:
+            return False
+
+        if name.startswith("END-"):
+            return False
+
+        return True
+
+    #
+    # General cleanup
+    #
     def _normalize_line_endings(
         self,
         text: str,
     ) -> str:
-        return text.replace(
-            "\r\n",
-            "\n",
-        ).replace(
-            "\r",
-            "\n",
-        )
-
-    def _repair_broken_multiline_move(
-        self,
-        text: str,
-    ) -> str:
-        """
-        Repairs cases created by previous formatting:
-
-        MOVE DCLX.FIELD.
-        TO OUT-FIELD.
-
-        into:
-
-        MOVE DCLX.FIELD
-        TO OUT-FIELD.
-        """
-
-        lines = text.splitlines()
-        output: list[str] = []
-
-        for index, line in enumerate(lines):
-            stripped = line.strip()
-            upper = stripped.upper()
-
-            if upper.startswith("MOVE ") and stripped.endswith("."):
-                next_index = self._next_non_empty_index(
-                    lines=lines,
-                    start=index + 1,
-                )
-
-                if next_index is not None:
-                    next_line = lines[next_index].strip()
-
-                    if next_line.upper().startswith("TO "):
-                        line = line.rstrip()[:-1]
-
-            output.append(
-                line,
-            )
-
-        return "\n".join(
-            output,
-        )
-
-    def _remove_redundant_generated_continue(
-        self,
-        text: str,
-    ) -> str:
-        """
-        Removes harmless generated CONTINUE lines that appear immediately
-        before the generated cursor paragraph marker.
-        """
-
-        return re.sub(
-            r"\n\s*CONTINUE\.\s*\n\s*\*{10,}\s*\n\s*\*\s*DB2 GENERATED CURSOR OPEN FETCH CLOSE PARAGRAPHS",
-            "\n\n"
-            "      ******************************************************************\n"
-            "      * DB2 GENERATED CURSOR OPEN FETCH CLOSE PARAGRAPHS",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-    def _pre_normalize_known_generated_lines(
-        self,
-        text: str,
-    ) -> str:
-        text = re.sub(
-            r"(?m)^\s*END-EVALUATE\.\s*$",
-            "END-EVALUATE.",
-            text,
-        )
-
-        text = re.sub(
-            r"(?m)^\s*TO\s+",
-            "TO ",
-            text,
-        )
-
-        return text
-
-    def _next_non_empty_index(
-        self,
-        lines: list[str],
-        start: int,
-    ) -> int | None:
-        for index in range(start, len(lines)):
-            if lines[index].strip():
-                return index
-
-        return None
-
-    def _format_sql_line(
-        self,
-        stripped: str,
-    ) -> str:
-        upper = stripped.upper()
-
-        if stripped.startswith(","):
-            return f"{self.SQL_CONTINUATION_INDENT}{stripped}"
-
-        if stripped.startswith(":"):
-            return f"{self.SQL_CONTINUATION_INDENT}{stripped}"
-
-        sql_clause_prefixes = (
-            "DECLARE ",
-            "SELECT",
-            "INTO",
-            "FROM ",
-            "WHERE",
-            "ORDER BY",
-            "GROUP BY",
-            "HAVING",
-            "FETCH",
-            "OPEN ",
-            "CLOSE ",
-            "COMMIT",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-            "SET",
-            "VALUES",
-            "FOR READ ONLY",
-            "INCLUDE",
-        )
-
-        if upper.startswith(sql_clause_prefixes):
-            return f"{self.SQL_INDENT}{stripped}"
-
-        if upper.startswith("AND "):
-            return f"{self.SQL_CONTINUATION_INDENT}{stripped}"
-
-        if upper.startswith("OR "):
-            return f"{self.SQL_CONTINUATION_INDENT}{stripped}"
-
-        return f"{self.SQL_CONTINUATION_INDENT}{stripped}"
-
-    def _format_cobol_line(
-        self,
-        stripped: str,
-        if_depth: int,
-        evaluate_stack: list[int],
-        pending_multiline_move: bool,
-    ) -> tuple[str, int, list[int], bool]:
-        upper = stripped.upper()
-
-        if self._is_division_or_section_header(
-            upper,
-        ):
-            return f"{self.PARAGRAPH_INDENT}{stripped.upper()}", 0, [], False
-
-        if upper.startswith("PROGRAM-ID."):
-            return (
-                f"{self.BASE_INDENT}{self._normalize_program_id_text(stripped)}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if upper.startswith("END PROGRAM "):
-            return (
-                f"{self.PARAGRAPH_INDENT}{self._ensure_period(stripped.upper())}",
-                0,
-                [],
-                False,
-            )
-
-        if self._is_paragraph_header(
-            stripped,
-        ):
-            return f"{self.PARAGRAPH_INDENT}{stripped.upper()}", 0, [], False
-
-        if upper.startswith("*"):
-            return (
-                f"{self.COMMENT_INDENT}{stripped}",
-                if_depth,
-                evaluate_stack,
-                pending_multiline_move,
-            )
-
-        if self._is_data_level_line(
-            upper,
-        ):
-            return (
-                f"{self.BASE_INDENT}{stripped}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if upper.startswith("EVALUATE "):
-            evaluate_stack.append(
-                if_depth,
-            )
-
-            return (
-                f"{self._statement_indent(if_depth)}{stripped.rstrip('.')}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if upper.startswith("WHEN "):
-            evaluate_depth = evaluate_stack[-1] if evaluate_stack else if_depth
-
-            return (
-                f"{self._statement_indent(evaluate_depth + 1)}{stripped}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if upper.startswith("END-EVALUATE"):
-            evaluate_depth = evaluate_stack.pop() if evaluate_stack else 0
-
-            return (
-                f"{self._statement_indent(evaluate_depth)}END-EVALUATE.",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if evaluate_stack:
-            evaluate_depth = evaluate_stack[-1]
-
-            return self._format_evaluate_body_line(
-                stripped=stripped,
-                if_depth=if_depth,
-                evaluate_depth=evaluate_depth,
-                evaluate_stack=evaluate_stack,
-            )
-
-        if upper.startswith("IF "):
-            return (
-                f"{self._statement_indent(if_depth)}{stripped}",
-                if_depth + 1,
-                evaluate_stack,
-                False,
-            )
-
-        if upper == "ELSE":
-            adjusted_depth = max(
-                if_depth - 1,
-                0,
-            )
-
-            return (
-                f"{self._statement_indent(adjusted_depth)}{stripped}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if upper.startswith("END-IF"):
-            new_if_depth = max(
-                if_depth - 1,
-                0,
-            )
-
-            return (
-                f"{self._statement_indent(new_if_depth)}END-IF.",
-                new_if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if pending_multiline_move:
-            if upper.startswith("TO "):
-                return (
-                    f"{self.MOVE_TO_INDENT}{self._ensure_period(stripped)}",
-                    if_depth,
-                    evaluate_stack,
-                    False,
-                )
-
-            return (
-                f"{self._statement_indent(if_depth)}{stripped}",
-                if_depth,
-                evaluate_stack,
-                pending_multiline_move,
-            )
-
-        if upper.startswith("MOVE "):
-            if " TO " in upper:
-                return (
-                    f"{self._statement_indent(if_depth)}{self._ensure_period(stripped)}",
-                    if_depth,
-                    evaluate_stack,
-                    False,
-                )
-
-            return (
-                f"{self._statement_indent(if_depth)}{stripped}",
-                if_depth,
-                evaluate_stack,
-                True,
-            )
-
-        if self._needs_period(
-            upper,
-        ):
-            return (
-                f"{self._statement_indent(if_depth)}{self._ensure_period(stripped)}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        return (
-            f"{self._statement_indent(if_depth)}{stripped}",
-            if_depth,
-            evaluate_stack,
-            pending_multiline_move,
-        )
-
-    def _format_evaluate_body_line(
-        self,
-        stripped: str,
-        if_depth: int,
-        evaluate_depth: int,
-        evaluate_stack: list[int],
-    ) -> tuple[str, int, list[int], bool]:
-        upper = stripped.upper()
-        body_depth = evaluate_depth + 2
-
-        if upper.startswith("IF "):
-            return (
-                f"{self._statement_indent(body_depth + if_depth)}{stripped}",
-                if_depth + 1,
-                evaluate_stack,
-                False,
-            )
-
-        if upper == "ELSE":
-            adjusted_if_depth = max(
-                if_depth - 1,
-                0,
-            )
-
-            return (
-                f"{self._statement_indent(body_depth + adjusted_if_depth)}{stripped}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if upper.startswith("END-IF"):
-            new_if_depth = max(
-                if_depth - 1,
-                0,
-            )
-
-            return (
-                f"{self._statement_indent(body_depth + new_if_depth)}END-IF.",
-                new_if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        if self._needs_period(
-            upper,
-        ):
-            return (
-                f"{self._statement_indent(body_depth + if_depth)}{self._ensure_period(stripped)}",
-                if_depth,
-                evaluate_stack,
-                False,
-            )
-
-        return (
-            f"{self._statement_indent(body_depth + if_depth)}{stripped}",
-            if_depth,
-            evaluate_stack,
-            False,
-        )
-
-    def _remove_blank_lines_inside_exec_sql(
-        self,
-        text: str,
-    ) -> str:
-        lines = text.splitlines()
-        output: list[str] = []
-        in_exec_sql = False
-
-        for line in lines:
-            stripped = line.strip()
-            upper = stripped.upper()
-
-            if upper.startswith("EXEC SQL"):
-                in_exec_sql = True
-                output.append(line)
-                continue
-
-            if upper.startswith("END-EXEC"):
-                in_exec_sql = False
-                output.append(line)
-                continue
-
-            if in_exec_sql and not stripped:
-                continue
-
-            output.append(line)
-
-        return "\n".join(
-            output,
-        )
-
-    def _remove_blank_lines_before_end_exec(
-        self,
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"\n\s*\n(\s*END-EXEC\.)",
-            r"\n\1",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-    def _remove_blank_lines_before_end_evaluate(
-        self,
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"\n\s*\n(\s*END-EVALUATE\.)",
-            r"\n\1",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-    def _post_fix_end_evaluate_indentation(
-        self,
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"(?m)^\s*END-EVALUATE\.\s*$",
-            f"{self.BASE_INDENT}END-EVALUATE.",
-            text,
-        )
-
-    def _post_fix_multiline_move_indentation(
-        self,
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"(?m)^(\s*MOVE\s+[^\n]+)\n\s*(TO\s+[A-Z0-9-]+\.?)",
-            rf"\1\n{self.MOVE_TO_INDENT}\2",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-    def _normalize_program_id_case(
-        self,
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"(?im)^(\s*PROGRAM-ID\.\s*)([A-Z0-9-]+)(\.)?\s*$",
-            lambda match: (
-                f"{match.group(1).upper()}"
-                f"{match.group(2).upper()}."
-            ),
-            text,
-        )
-
-    def _post_fix_paragraph_spacing(
-        self,
-        text: str,
-    ) -> str:
-        lines = text.splitlines()
-        output: list[str] = []
-
-        for line in lines:
-            stripped = line.strip()
-            upper = stripped.upper()
-
-            if (
-                self._is_paragraph_header(stripped)
-                and output
-                and output[-1].strip()
-                and not output[-1].strip().upper().endswith("DIVISION.")
-                and not output[-1].strip().upper().endswith("SECTION.")
-                and not output[-1].strip().startswith("*")
-                and upper not in {
-                    "END-EXEC.",
-                    "END-EVALUATE.",
-                    "END-IF.",
-                }
-            ):
-                output.append("")
-
-            output.append(line)
-
-        return "\n".join(output)
-
-    def _post_fix_division_spacing(
-        self,
-        text: str,
-    ) -> str:
-        text = re.sub(
-            r"(?m)^(           PROGRAM-ID\.[^\n]+)\n(       ENVIRONMENT DIVISION\.)",
-            r"\1\n\n\2",
-            text,
-        )
-
-        text = re.sub(
-            r"(?m)^(       ENVIRONMENT DIVISION\.)\n(       DATA DIVISION\.)",
-            r"\1\n\n\2",
-            text,
-        )
-
-        return text
-
-    def _statement_indent(
-        self,
-        depth: int,
-    ) -> str:
-        if depth <= 0:
-            return self.BASE_INDENT
-
-        return self.BASE_INDENT + (self.INDENT_STEP * depth)
-
-    def _normalize_program_id_text(
-        self,
-        stripped: str,
-    ) -> str:
-        match = re.search(
-            r"PROGRAM-ID\.\s*([A-Z0-9-]+)",
-            stripped,
-            flags=re.IGNORECASE,
-        )
-
-        if not match:
-            return stripped.upper()
-
-        return f"PROGRAM-ID. {match.group(1).upper()}."
-
-    def _is_division_or_section_header(
-        self,
-        upper: str,
-    ) -> bool:
-        return upper in {
-            "IDENTIFICATION DIVISION.",
-            "ENVIRONMENT DIVISION.",
-            "DATA DIVISION.",
-            "PROCEDURE DIVISION.",
-            "CONFIGURATION SECTION.",
-            "INPUT-OUTPUT SECTION.",
-            "FILE SECTION.",
-            "WORKING-STORAGE SECTION.",
-            "LINKAGE SECTION.",
-        }
-
-    def _is_paragraph_header(
-        self,
-        stripped: str,
-    ) -> bool:
-        if not stripped.endswith("."):
-            return False
-
-        upper = stripped.upper()
-
-        if " " in upper:
-            return False
-
-        if upper.startswith(
-            (
-                "IF",
-                "ELSE",
-                "END-IF",
-                "MOVE",
-                "PERFORM",
-                "DISPLAY",
-                "SET",
-                "CONTINUE",
-                "WHEN",
-                "EVALUATE",
-                "GOBACK",
-                "EXIT",
-            )
-        ):
-            return False
-
-        return bool(
-            re.fullmatch(
-                r"[A-Z0-9-]+\.",
-                upper,
-            )
-        )
-
-    def _is_data_level_line(
-        self,
-        upper: str,
-    ) -> bool:
-        return bool(
-            re.match(
-                r"^(0[1-9]|[1-4][0-9]|66|77|88)\s+",
-                upper,
-            )
-        )
-
-    def _needs_period(
-        self,
-        upper: str,
-    ) -> bool:
-        return upper.startswith(
-            (
-                "PERFORM ",
-                "DISPLAY ",
-                "CONTINUE",
-                "SET ",
-                "GOBACK",
-                "EXIT",
-            )
-        )
-
-    def _ensure_period(
-        self,
-        stripped: str,
-    ) -> str:
-        if stripped.endswith("."):
-            return stripped
-
-        return stripped + "."
-
-    def _ensure_sql_error_continue(
-        self,
-        text: str,
-    ) -> str:
-        pattern = (
-            r"(SQL-ERROR\.\s*\n"
-            r"\s*DISPLAY\s+'DB2 SQL ERROR SQLCODE='\s+SQLCODE\.\s*\n"
-            r"\s*DISPLAY\s+'DB2 SQL ERROR LOCATION='\s+SQL-LOCATION\.)"
-            r"(?!\s*\n\s*CONTINUE\.)"
-        )
-
-        return re.sub(
-            pattern,
-            r"\1\n           CONTINUE.",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-    def _normalize_period_spacing(
-        self,
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"\s+\.",
-            ".",
-            text,
-        )
+        return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
 
     def _normalize_blank_lines(
         self,
         text: str,
     ) -> str:
-        return re.sub(
-            r"\n{3,}",
+        text = re.sub(
+            r"\n{4,}",
+            "\n\n\n",
+            text,
+        )
+
+        text = re.sub(
+            r"\n[ \t]+\n",
             "\n\n",
             text,
         )
+
+        return text

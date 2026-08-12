@@ -37,28 +37,43 @@ class SheetMappingParser:
             "Cobol Record IDMS",
             "COBOL RECORD IDMS",
             "Cobol Record",
+            "COBOL Record",
             "IDMS Record",
             "Record IDMS",
             "Cobol Record Name",
             "IDMS to DB2 Mapping",
+
+            # Production CSV variants seen in uploaded Sheet Mapping.
+            "Cobol Recrd IDMS",
+            "COBOL RECRD IDMS",
+            "Cobol Rec IDMS",
+            "COBOL REC IDMS",
+            "Cobol Rcrd IDMS",
+            "COBOL RCRD IDMS",
+            "Cobol Recrd",
+            "COBOL RECRD",
         ],
         "Cobol Zone": [
             "Cobol Zone",
             "COBOL Zone",
+            "COBOL ZONE",
             "Cobol Field",
-            "IDMS Field",
             "COBOL Field",
+            "IDMS Field",
             "IDMS COBOL Zone",
+            "IDMS COBOL Field",
+            "Zone",
         ],
         "IDMS Key": [
             "IDMS Key",
             "IDMS KEY",
             "Key IDMS",
+            "IDMS_Key",
         ],
         "IDMS PIC Clause": [
             "IDMS PIC Clause",
-            "PIC Clause",
             "IDMS PIC",
+            "PIC Clause",
             "Picture",
             "PIC",
         ],
@@ -67,6 +82,7 @@ class SheetMappingParser:
             "Length",
             "Field Length",
             "Length Bytes",
+            "Length of Field",
         ],
         "Field end position": [
             "Field end position",
@@ -79,25 +95,39 @@ class SheetMappingParser:
             "DB2 key",
             "DB2 KEY",
             "Key DB2",
+            "DB2_key",
+            "DB2_Key",
+            "DB2KEY",
         ],
         "New DB2 Record": [
             "New DB2 Record",
+            "New DB2 Record ",
             "DB2 Record",
             "DB2 Table",
             "New DB2 Table",
             "Table",
+            "DB2_Table",
+            "New DB2_Record",
         ],
         "New DB2 Field name": [
             "New DB2 Field name",
             "New DB2 Field Name",
+            "New DB2_Field name",
+            "New DB2_Field Name",
+            "New DB2 Field",
+            "New DB2_Field",
             "DB2 Field",
             "DB2 Column",
             "New DB2 Column",
             "Column",
+            "DB2_Field",
+            "DB2_Column",
         ],
         "New DB2 Data Type": [
             "New DB2 Data Type",
             "New DB2 DataType",
+            "New DB2_Data Type",
+            "New DB2_DataType",
             "DB2 Data Type",
             "DB2 DataType",
             "DB2 Type",
@@ -110,6 +140,7 @@ class SheetMappingParser:
             "Hopex Expression Type",
             "Expression Type",
             "Expression Type Remark",
+            "Hopex Type",
         ],
         "Remarks": [
             "Remarks",
@@ -122,6 +153,8 @@ class SheetMappingParser:
             "Set",
             "Relationship",
             "Set Name",
+            "IDMS Set",
+            "IDMS Relation",
         ],
         "Reference Field Name (CopyBook) ": [
             "Reference Field Name (CopyBook) ",
@@ -129,6 +162,7 @@ class SheetMappingParser:
             "Reference Field Name (Copybook)",
             "Reference Field Name CopyBook",
             "Reference Field Name Copybook",
+            "Reference Field Name",
             "CopyBook Field",
             "Copybook Field",
             "Reference Field",
@@ -137,6 +171,7 @@ class SheetMappingParser:
             "Reference Field PIC Clause",
             "Reference PIC",
             "Reference Field PIC",
+            "Reference PIC Clause",
         ],
         "Cross Application DB2 table": [
             "Cross Application DB2 table",
@@ -144,16 +179,21 @@ class SheetMappingParser:
             "Cross App DB2 Table",
             "Cross Application Table",
             "Cross Application DB2 Record",
+            "Cross Application DB2_Table",
         ],
         "Cross Application DB2 Field Name": [
             "Cross Application DB2 Field Name",
             "Cross App DB2 Field",
             "Cross Application Field Name",
             "Cross Application DB2 Column",
+            "Cross Application DB2_Field Name",
+            "Cross Application DB2_Field",
         ],
         "Cross Appln DB2 Data Type": [
             "Cross Appln DB2 Data Type",
             "Cross Appln DB2 DataType",
+            "Cross Appln DB2_Data Type",
+            "Cross Appln DB2_DataType",
             "Cross Application DB2 Data Type",
             "Cross Application DB2 DataType",
             "Cross App DB2 Type",
@@ -165,9 +205,7 @@ class SheetMappingParser:
         ],
     }
 
-    def __init__(
-        self,
-    ) -> None:
+    def __init__(self) -> None:
         self.diagnostics: list[str] = []
 
     def parse_uploaded_file(
@@ -177,28 +215,17 @@ class SheetMappingParser:
         self.diagnostics = []
 
         if uploaded_file is None:
-            self.diagnostics.append(
-                "No Sheet Mapping file supplied."
-            )
+            self.diagnostics.append("No Sheet Mapping file supplied.")
             return []
 
-        file_name = str(
-            uploaded_file.name or "",
-        ).lower()
-
+        file_name = str(uploaded_file.name or "").lower()
         raw_bytes = uploaded_file.getvalue()
 
-        self.diagnostics.append(
-            f"Sheet Mapping file name: {file_name}"
-        )
-        self.diagnostics.append(
-            f"Sheet Mapping file size bytes: {len(raw_bytes)}"
-        )
+        self.diagnostics.append(f"Sheet Mapping file name: {file_name}")
+        self.diagnostics.append(f"Sheet Mapping file size bytes: {len(raw_bytes)}")
 
         if file_name.endswith(".xlsx"):
-            return self.parse_xlsx_bytes(
-                raw_bytes,
-            )
+            return self.parse_xlsx_bytes(raw_bytes)
 
         if file_name.endswith(".xls"):
             self.diagnostics.append(
@@ -211,168 +238,118 @@ class SheetMappingParser:
             errors="ignore",
         )
 
-        self.diagnostics.append(
-            f"CSV/text decoded length: {len(text)}"
-        )
+        self.diagnostics.append(f"CSV/text decoded length: {len(text)}")
 
-        return self.parse_csv_text(
-            text,
-        )
+        if text:
+            sample = text[:500].replace("\r", "\\r").replace("\n", "\\n")
+            self.diagnostics.append(f"CSV/text sample: {sample}")
+
+        return self.parse_csv_text(text)
 
     def parse_csv_text(
         self,
         text: str,
     ) -> list[SheetMappingRow]:
-        if not text or not text.strip():
-            self.diagnostics.append(
-                "CSV/text content is empty."
-            )
+        if not str(text or "").strip():
+            self.diagnostics.append("CSV/text Sheet Mapping is empty.")
             return []
 
-        cleaned_text = text.replace(
-            "\ufeff",
-            "",
-        )
+        stream = StringIO(text)
+        reader = csv.reader(stream)
+        raw_rows = [tuple(row) for row in reader]
 
-        sample = cleaned_text[:500].replace(
-            "\n",
-            "\\n",
-        )
-
-        self.diagnostics.append(
-            f"CSV/text sample: {sample}"
-        )
-
-        reader = csv.DictReader(
-            StringIO(cleaned_text),
-        )
-
-        if not reader.fieldnames:
-            self.diagnostics.append(
-                "CSV header not detected."
-            )
+        if not raw_rows:
+            self.diagnostics.append("CSV/text Sheet Mapping has no rows.")
             return []
 
-        self.diagnostics.append(
-            f"CSV detected headers: {reader.fieldnames}"
-        )
+        headers = [
+            self._cell_to_string(value)
+            for value in raw_rows[0]
+        ]
 
-        rows: list[SheetMappingRow] = []
+        self.diagnostics.append(f"CSV detected headers: {headers}")
 
-        for raw_row in reader:
-            normalized_raw_row = self._normalize_raw_dict_keys(
-                raw_row,
-            )
+        output: list[SheetMappingRow] = []
 
-            mapping_row = self._to_mapping_row(
-                normalized_raw_row,
-            )
+        for row in raw_rows[1:]:
+            raw_row: dict[str, str] = {}
 
-            if self._has_useful_content(
-                mapping_row,
-            ):
-                rows.append(
-                    mapping_row,
-                )
+            for index, header in enumerate(headers):
+                if not header:
+                    continue
 
-        self.diagnostics.append(
-            f"CSV parsed useful rows: {len(rows)}"
-        )
+                value = row[index] if index < len(row) else ""
+                raw_row[header] = self._cell_to_string(value)
 
-        return rows
+            normalized_raw_row = self._normalize_raw_dict_keys(raw_row)
+            mapping_row = self._to_mapping_row(normalized_raw_row)
+
+            if self._has_useful_content(mapping_row):
+                output.append(mapping_row)
+
+        self.diagnostics.append(f"CSV parsed useful rows: {len(output)}")
+        self._add_population_diagnostics(output)
+
+        return output
 
     def parse_xlsx_bytes(
         self,
         raw_bytes: bytes,
     ) -> list[SheetMappingRow]:
         if not raw_bytes:
-            self.diagnostics.append(
-                "XLSX file bytes are empty."
-            )
+            self.diagnostics.append("XLSX Sheet Mapping is empty.")
             return []
 
         workbook = load_workbook(
-            filename=BytesIO(raw_bytes),
+            BytesIO(raw_bytes),
             data_only=True,
             read_only=True,
         )
 
-        sheet_names = [
-            sheet.title
-            for sheet in workbook.worksheets
-        ]
+        output: list[SheetMappingRow] = []
 
-        self.diagnostics.append(
-            f"Workbook sheets: {sheet_names}"
-        )
+        for worksheet in workbook.worksheets:
+            rows = list(worksheet.iter_rows(values_only=True))
 
-        all_rows: list[SheetMappingRow] = []
+            if not rows:
+                continue
 
-        for sheet in workbook.worksheets:
-            self.diagnostics.append(
-                f"Reading sheet: {sheet.title}"
+            header_index = self._find_header_row(
+                rows=rows,
+                sheet_title=worksheet.title,
             )
 
-            sheet_rows = self._parse_worksheet(
-                sheet,
-            )
-
-            self.diagnostics.append(
-                f"Sheet {sheet.title} parsed useful rows: {len(sheet_rows)}"
-            )
-
-            if sheet_rows:
-                all_rows.extend(
-                    sheet_rows,
+            if header_index < 0:
+                self.diagnostics.append(
+                    f"Sheet {worksheet.title}: no Sheet Mapping header row detected."
                 )
+                continue
 
-        self.diagnostics.append(
-            f"Workbook total parsed rows: {len(all_rows)}"
-        )
-
-        return all_rows
-
-    def _parse_worksheet(
-        self,
-        sheet,
-    ) -> list[SheetMappingRow]:
-        raw_rows = list(
-            sheet.iter_rows(
-                values_only=True,
+            parsed_rows = self._parse_xlsx_rows_from_header(
+                raw_rows=rows,
+                header_index=header_index,
             )
-        )
 
-        self.diagnostics.append(
-            f"Sheet {sheet.title} raw row count: {len(raw_rows)}"
-        )
-
-        if not raw_rows:
-            return []
-
-        header_index = self._find_header_row(
-            rows=raw_rows,
-            sheet_title=sheet.title,
-        )
-
-        if header_index < 0:
             self.diagnostics.append(
-                f"Sheet {sheet.title}: header row not found."
+                f"Sheet {worksheet.title}: parsed useful rows: {len(parsed_rows)}"
             )
-            return []
 
+            output.extend(parsed_rows)
+
+        self.diagnostics.append(f"XLSX parsed useful rows: {len(output)}")
+        self._add_population_diagnostics(output)
+
+        return output
+
+    def _parse_xlsx_rows_from_header(
+        self,
+        raw_rows: list[tuple],
+        header_index: int,
+    ) -> list[SheetMappingRow]:
         headers = [
-            self._cell_to_string(
-                value,
-            )
+            self._cell_to_string(value)
             for value in raw_rows[header_index]
         ]
-
-        self.diagnostics.append(
-            f"Sheet {sheet.title}: header row index: {header_index}"
-        )
-        self.diagnostics.append(
-            f"Sheet {sheet.title}: detected headers: {headers}"
-        )
 
         output: list[SheetMappingRow] = []
 
@@ -384,25 +361,13 @@ class SheetMappingParser:
                     continue
 
                 value = row[index] if index < len(row) else ""
+                raw_row[header] = self._cell_to_string(value)
 
-                raw_row[header] = self._cell_to_string(
-                    value,
-                )
+            normalized_raw_row = self._normalize_raw_dict_keys(raw_row)
+            mapping_row = self._to_mapping_row(normalized_raw_row)
 
-            normalized_raw_row = self._normalize_raw_dict_keys(
-                raw_row,
-            )
-
-            mapping_row = self._to_mapping_row(
-                normalized_raw_row,
-            )
-
-            if self._has_useful_content(
-                mapping_row,
-            ):
-                output.append(
-                    mapping_row,
-                )
+            if self._has_useful_content(mapping_row):
+                output.append(mapping_row)
 
         return output
 
@@ -411,47 +376,49 @@ class SheetMappingParser:
         rows: list[tuple],
         sheet_title: str,
     ) -> int:
+        canonical_groups = [
+            ["Cobol Record IDMS", "Cobol Recrd IDMS", "IDMS Record"],
+            ["New DB2 Record", "DB2 Table", "DB2 Record"],
+            ["New DB2 Field name", "New DB2_Field name", "DB2 Column"],
+        ]
+
         for index, row in enumerate(rows[:100]):
             normalized_cells = {
-                self._normalize_header(
-                    self._cell_to_string(
-                        value,
-                    )
-                )
+                self._normalize_header(self._cell_to_string(value))
                 for value in row
                 if value is not None
             }
 
             if index < 10:
                 self.diagnostics.append(
-                    f"Sheet {sheet_title}: row {index} normalized cells: {sorted(normalized_cells)}"
+                    f"Sheet {sheet_title}: row {index} normalized cells: "
+                    f"{sorted(normalized_cells)}"
                 )
-
-            if self._normalize_header("Cobol Record IDMS") in normalized_cells:
-                return index
 
             if self._normalize_header("IDMS to DB2 Mapping") in normalized_cells:
                 return index
 
-            if (
-                self._normalize_header("New DB2 Record") in normalized_cells
-                and self._normalize_header("New DB2 Field name") in normalized_cells
-            ):
+            if self._row_has_any_header(normalized_cells, canonical_groups[0]):
                 return index
 
             if (
-                self._normalize_header("DB2 Record") in normalized_cells
-                and self._normalize_header("DB2 Column") in normalized_cells
-            ):
-                return index
-
-            if (
-                self._normalize_header("IDMS Record") in normalized_cells
-                and self._normalize_header("DB2 Table") in normalized_cells
+                self._row_has_any_header(normalized_cells, canonical_groups[1])
+                and self._row_has_any_header(normalized_cells, canonical_groups[2])
             ):
                 return index
 
         return -1
+
+    def _row_has_any_header(
+        self,
+        normalized_cells: set[str],
+        aliases: list[str],
+    ) -> bool:
+        for alias in aliases:
+            if self._normalize_header(alias) in normalized_cells:
+                return True
+
+        return False
 
     def _to_mapping_row(
         self,
@@ -543,9 +510,7 @@ class SheetMappingParser:
     ) -> str:
         aliases = self.FIELD_ALIASES.get(
             canonical_name,
-            [
-                canonical_name,
-            ],
+            [canonical_name],
         )
 
         normalized_lookup = {
@@ -554,18 +519,11 @@ class SheetMappingParser:
         }
 
         for alias in aliases:
-            normalized_alias = self._normalize_header(
-                alias,
-            )
-
-            value = normalized_lookup.get(
-                normalized_alias,
-            )
+            normalized_alias = self._normalize_header(alias)
+            value = normalized_lookup.get(normalized_alias)
 
             if value is not None:
-                return str(
-                    value,
-                ).strip()
+                return str(value).strip()
 
         return ""
 
@@ -576,13 +534,8 @@ class SheetMappingParser:
         normalized: dict[str, str] = {}
 
         for key, value in row.items():
-            clean_key = self._cell_to_string(
-                key,
-            )
-
-            clean_value = self._cell_to_string(
-                value,
-            )
+            clean_key = self._cell_to_string(key)
+            clean_value = self._cell_to_string(value)
 
             if clean_key:
                 normalized[clean_key] = clean_value
@@ -596,32 +549,12 @@ class SheetMappingParser:
         if value is None:
             return ""
 
-        text = str(
-            value,
-        )
-
-        text = text.replace(
-            "\ufeff",
-            "",
-        )
-        text = text.replace(
-            "\u00a0",
-            " ",
-        )
-        text = text.replace(
-            "\r",
-            " ",
-        )
-        text = text.replace(
-            "\n",
-            " ",
-        )
-
-        text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        )
+        text = str(value)
+        text = text.replace("\ufeff", "")
+        text = text.replace("\xa0", " ")
+        text = text.replace("\r\n", "\n")
+        text = text.replace("\r", "\n")
+        text = re.sub(r"[ \t]+", " ", text)
 
         return text.strip()
 
@@ -629,21 +562,11 @@ class SheetMappingParser:
         self,
         value: str,
     ) -> str:
-        text = self._cell_to_string(
-            value,
-        )
-
+        text = self._cell_to_string(value)
         text = text.upper()
-        text = text.replace(
-            "&",
-            "AND",
-        )
-
-        text = re.sub(
-            r"[^A-Z0-9]+",
-            "",
-            text,
-        )
+        text = text.replace("_", " ")
+        text = re.sub(r"[^A-Z0-9]+", " ", text)
+        text = re.sub(r"\s+", " ", text)
 
         return text.strip()
 
@@ -651,14 +574,87 @@ class SheetMappingParser:
         self,
         row: SheetMappingRow,
     ) -> bool:
-        return bool(
-            row.cobol_record_idms
-            or row.cobol_zone
-            or row.new_db2_record
-            or row.new_db2_field_name
-            or row.relation
-            or row.db2_key
-            or row.idms_key
-            or row.cross_application_db2_table
-            or row.cross_application_db2_field_name
+        values = [
+            row.cobol_record_idms,
+            row.cobol_zone,
+            row.idms_key,
+            row.idms_pic_clause,
+            row.db2_key,
+            row.new_db2_record,
+            row.new_db2_field_name,
+            row.new_db2_data_type,
+            row.relation,
+            row.reference_field_name_copybook,
+            row.cross_application_db2_table,
+            row.cross_application_db2_field_name,
+            row.basetype,
+        ]
+
+        return any(str(value or "").strip() for value in values)
+
+    def _add_population_diagnostics(
+        self,
+        rows: list[SheetMappingRow],
+    ) -> None:
+        record_count = sum(
+            1
+            for row in rows
+            if str(row.cobol_record_idms or "").strip()
+        )
+
+        source_field_count = sum(
+            1
+            for row in rows
+            if str(row.cobol_zone or "").strip()
+            or str(row.reference_field_name_copybook or "").strip()
+        )
+
+        db2_table_count = sum(
+            1
+            for row in rows
+            if str(row.new_db2_record or "").strip()
+            or str(row.cross_application_db2_table or "").strip()
+        )
+
+        db2_column_count = sum(
+            1
+            for row in rows
+            if str(row.new_db2_field_name or "").strip()
+            or str(row.cross_application_db2_field_name or "").strip()
+        )
+
+        useful_context_count = sum(
+            1
+            for row in rows
+            if (
+                str(row.cobol_record_idms or "").strip()
+                and (
+                    str(row.cobol_zone or "").strip()
+                    or str(row.reference_field_name_copybook or "").strip()
+                )
+                and (
+                    str(row.new_db2_record or "").strip()
+                    or str(row.cross_application_db2_table or "").strip()
+                )
+                and (
+                    str(row.new_db2_field_name or "").strip()
+                    or str(row.cross_application_db2_field_name or "").strip()
+                )
+            )
+        )
+
+        self.diagnostics.append(
+            f"Sheet Mapping populated Cobol Record IDMS rows: {record_count}"
+        )
+        self.diagnostics.append(
+            f"Sheet Mapping populated source field rows: {source_field_count}"
+        )
+        self.diagnostics.append(
+            f"Sheet Mapping populated DB2 table rows: {db2_table_count}"
+        )
+        self.diagnostics.append(
+            f"Sheet Mapping populated DB2 column rows: {db2_column_count}"
+        )
+        self.diagnostics.append(
+            f"Sheet Mapping useful source-to-target rows: {useful_context_count}"
         )
