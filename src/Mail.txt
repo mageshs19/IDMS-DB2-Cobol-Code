@@ -1,0 +1,166 @@
+Manual Comparison Summary
+I compared your latest generated outputs against the manual DB2 COBOL examples available in Training.pdf.
+
+Overall Status
+Program	Manual Match %	Status
+Retrieval - VMDZ4420	92%–95%	Very close to manual output
+Update - VMDZ1567	82%–85%	Good progress, but table mismatch remains
+Overall Conversion Accuracy	87%–90%	Strong baseline, needs final business-rule and naming alignment
+Retrieval Program Comparison
+Manual Reference
+The manual Retrieval output in Training.pdf shows the converted DB2 COBOL structure for VMDZ4420, including DB2 cursor-based retrieval flow and manual-style sequencing. [File: Training.pdf, Page: 7]
+
+The generated cursor numbering rule also matches the project logic:
+
+Cursor Order	Open	Fetch	Close
+First cursor	710	720	730
+Second cursor	810	820	830
+Third cursor	910	920	930
+[File: Code_Phase2-12-08-2026 v2.pdf, Page: 90]
+
+Retrieval Match Table
+Area	Manual Expectation	Current Generated Output	Match
+Program structure	Converted DB2 COBOL with original flow preserved	Preserved	Good
+Manual-style sequencing	Left and right sequence numbers	Present	Good
+DB2 infrastructure	SQLCA, SQLERRWS, DCLGEN includes	Present	Good
+Parent cursor	DZBEFFC1 with 710/720/730	Correct	Good
+Child cursor	DZEVEFC1 with 810/820/830	Correct	Good
+Cursor open/fetch/close paragraphs	Generated near end	Present	Good
+SQL-ERROR. paragraph	Required because cursor code performs SQL error handling	Present	Good
+SELECT / FETCH INTO count	Should align	Appears aligned	Good
+Business flow	Should remain close to original/manual	Mostly preserved	Good
+Retrieval Percentage
+text
+
+Retrieval current achievement: 92%–95%
+The remaining gap is mostly manual-style refinement, business-rule confirmation, and final review of field-level behavior.
+
+Update Program Comparison
+Manual Reference
+The manual Update output in Training.pdf shows:
+
+Program VMDZ1567
+Timestamp handling
+Restart-control logic
+DB2 update flow
+UPDATE DZBFARTV for the BFAR table update [File: Training.pdf, Page: 24] [File: Training.pdf, Page: 30] [File: Training.pdf, Page: 34]
+The DCLGEN reference also shows the actual DCLGEN table as:
+
+text
+
+DZBFARTV
+[File: Training.pdf, Page: 37]
+
+Update Match Table
+Area	Manual Expectation	Current Generated Output	Match
+Program structure	Converted VMDZ1567 DB2 COBOL	Present	Good
+CBL ARITH(EXTEND)	Expected for DB2 SQL	Present	Good
+SQLCA / SQLERRWS	Required DB2 infrastructure	Present	Good
+DCLGEN include	INCLUDE DZBFARTV	Present	Good
+Timestamp working storage	Generated timestamp fields	Present	Good
+600-GET-TIMESTAMP paragraph	Expected timestamp paragraph	Present	Good
+READ-FLAT-FILE-EXIT. before SQL-ERROR.	Clean paragraph boundary	Now present	Fixed / Good
+SQL-ERROR. paragraph	Required for PERFORM SQL-ERROR	Present	Good
+VMBFAR SELECT	Generated	Present	Mostly good
+VMBFAR UPDATE	Generated	Present	Mostly good
+DB2 table name	Manual/DCLGEN expects DZBFARTV	Current output still has DZBFARTB	Mismatch
+FFRECAB conversion	Requires Sheet Mapping and DCLGEN	Missing mapping, conversion skipped	Blocked by input data
+Update Key Mismatch
+Current Generated Output
+Your current output still has:
+
+cobol
+
+FROM DZBFARTB
+and:
+
+cobol
+
+UPDATE DZBFARTB
+Manual / DCLGEN Expected Output
+The manual reference uses:
+
+cobol
+
+UPDATE DZBFARTV
+[File: Training.pdf, Page: 34]
+
+The DCLGEN table is:
+
+text
+
+DZBFARTV
+[File: Training.pdf, Page: 37]
+
+So the expected output should be:
+
+cobol
+
+FROM DZBFARTV
+and:
+
+cobol
+
+UPDATE DZBFARTV
+Impact
+This is the main remaining technical mismatch in the update conversion.
+
+FFRECAB Status
+FFRECAB conversion is currently missing because Sheet Mapping metadata is not available.
+
+The project code handles missing Sheet Mapping by generating comments such as:
+
+cobol
+
+* DB2: Conversion skipped because Sheet Mapping entry does not exist.
+* DB2: Missing Sheet Mapping metadata for record FFRECAB.
+This behavior is consistent with the converter’s missing-mapping handling. [File: Code_Phase2-12-08-2026 v2.pdf, Page: 236]
+
+Impact
+This is not a Python logic failure. It is blocked by missing input metadata.
+
+To fully convert FFRECAB, we need:
+
+Sheet Mapping entry for FFRECAB
+DB2 table name
+DB2 column mappings
+DCLGEN for the corresponding DB2 table
+Key / relation details for select, insert, update behavior
+Percentage Assessment
+Program	Current %	After Table Name Fix	After FFRECAB Mapping
+Retrieval	92%–95%	92%–95%	92%–95%
+Update	82%–85%	88%–90%	93%–95%
+Overall	87%–90%	90%–92%	93%–95%
+Current Achievement
+text
+
+Retrieval: 92%–95%
+Update:    82%–85%
+Overall:   87%–90%
+Recommended Next Steps
+Fix DB2 table resolver
+
+Ensure DZBFARTB resolves to DZBFARTV when DCLGEN has DZBFARTV.
+Confirm naming conversion rules
+
+Table naming: TB vs TV
+Host group naming: DCLDZBFARTV
+Cursor naming
+Audit fields naming and timestamp fields
+Review business rules line by line
+
+Especially update flow around FFRECAB, restart logic, VMBFAR update, and commit logic.
+Prepare a conversion rule document
+
+Input authority hierarchy
+IDMS statement conversion rules
+DCLGEN host-variable rules
+SQL generation rules
+Cursor rules
+Audit/timestamp generation rules
+Known exceptions and required manual confirmations
+Schedule one detailed walkthrough session
+
+Use this sample as a reference.
+Compare IDMS input, manual DB2 output, and generated DB2 output line by line.
+Capture agreed Belfius-side naming and business conversion rules.
