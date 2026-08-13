@@ -25,3 +25,5 @@ Standalone Phase 2 project for converting IDMS COBOL programs into DB2 embedded 
 ```bash
 set PYTHONPATH=src
 python -m streamlit run src/idms_db2_phase2/app.py --server.port 8502
+
+python src\idms_db2_phase2\testing\run_retrieval.py

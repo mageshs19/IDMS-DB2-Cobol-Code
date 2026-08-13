@@ -9,7 +9,8 @@ class Db2CursorParagraphGenerator:
     """
     Generates DB2 cursor OPEN / FETCH / CLOSE paragraphs.
 
-    Core rule:
+    Core rules:
+
     - Sheet Mapping is the authority for DB2 record/table names.
     - Sheet Mapping is the authority for DB2 column names.
     - DCLGEN is the authority for host variable names and PIC clauses.
@@ -32,6 +33,19 @@ class Db2CursorParagraphGenerator:
             810-OPEN-DZEVEFC1
             820-FETCH-DZEVEFC1
             830-CLOSE-DZEVEFC1
+
+    Important fix:
+
+    - Also rewrites already-numbered cursor PERFORM calls.
+      Example:
+          PERFORM 710-OPEN-DZEVEFC1.
+      becomes:
+          PERFORM 810-OPEN-DZEVEFC1.
+
+    This is needed because the transformer may initially generate
+    710 / 720 / 730 calls for every cursor. This generator owns the final
+    Sheet-Mapping-driven cursor paragraph numbering and must align the
+    procedure calls with the generated paragraph names.
     """
 
     GENERATED_MARKER = "* DB2 GENERATED CURSOR OPEN FETCH CLOSE PARAGRAPHS"
@@ -47,7 +61,7 @@ class Db2CursorParagraphGenerator:
     )
 
     PROCEDURE_DIVISION_PATTERN = re.compile(
-        r"^\s*PROCEDURE\s+DIVISION\b.*$",
+        r"^\s*(?:\d{6}\s+)?PROCEDURE\s+DIVISION\b.*$",
         flags=re.IGNORECASE | re.MULTILINE,
     )
 
@@ -76,12 +90,6 @@ class Db2CursorParagraphGenerator:
         if not cobol_text:
             return cobol_text, self.messages
 
-        if self.GENERATED_MARKER in cobol_text:
-            self.messages.append(
-                "DB2 cursor paragraphs: generated cursor paragraph block already exists; not inserted again."
-            )
-            return cobol_text, self.messages
-
         cursor_specs = self._cursor_specs()
 
         if not cursor_specs:
@@ -102,6 +110,18 @@ class Db2CursorParagraphGenerator:
                 spec=spec,
             )
 
+            updated_text = self._replace_numbered_cursor_calls(
+                text=updated_text,
+                spec=spec,
+            )
+
+        if self.GENERATED_MARKER in updated_text:
+            self.messages.append(
+                "DB2 cursor paragraphs: generated cursor paragraph block already exists; "
+                "cursor PERFORM calls were normalized only."
+            )
+            return updated_text, self.messages
+
         block = self._paragraph_block(
             cursor_specs=cursor_specs,
             sql_error_paragraph=sql_error_paragraph,
@@ -113,7 +133,8 @@ class Db2CursorParagraphGenerator:
         )
 
         self.messages.append(
-            f"DB2 cursor paragraphs: generated {len(cursor_specs)} Sheet Mapping driven cursor paragraph set(s)."
+            f"DB2 cursor paragraphs: generated {len(cursor_specs)} "
+            "Sheet Mapping driven cursor paragraph set(s)."
         )
 
         for spec in cursor_specs:
@@ -127,7 +148,9 @@ class Db2CursorParagraphGenerator:
             if not host_variables:
                 self.messages.append(
                     "DB2 cursor paragraphs: no FETCH host variables resolved for "
-                    f"cursor {spec['cursor_name']} record {spec['record_name']} table {spec['table_name']}."
+                    f"cursor {spec['cursor_name']} "
+                    f"record {spec['record_name']} "
+                    f"table {spec['table_name']}."
                 )
 
         return updated_text, self.messages
@@ -137,7 +160,6 @@ class Db2CursorParagraphGenerator:
     ) -> list[dict[str, object]]:
         specs: list[dict[str, object]] = []
         seen_keys: set[tuple[str, str, str]] = set()
-
         cursor_index = 0
 
         for operation in self.operations:
@@ -155,6 +177,7 @@ class Db2CursorParagraphGenerator:
             set_name = NameNormalizer.normalize(
                 operation.set_name,
             )
+
             record_name = NameNormalizer.normalize(
                 operation.record_name,
             )
@@ -234,9 +257,10 @@ class Db2CursorParagraphGenerator:
     ) -> dict[str, int]:
         """
         Manual style:
-        - First cursor:  710 / 720 / 730
-        - Second cursor: 810 / 820 / 830
-        - Third cursor:  910 / 920 / 930
+
+        - First cursor  : 710 / 720 / 730
+        - Second cursor : 810 / 820 / 830
+        - Third cursor  : 910 / 920 / 930
         """
 
         base = 710 + (cursor_index * 100)
@@ -302,8 +326,9 @@ class Db2CursorParagraphGenerator:
         spec: dict[str, object],
     ) -> str:
         """
-        Replaces previously generated cursor paragraph calls that were based on
-        IDMS set names with manual-style paragraph names based on DB2 record names.
+        Replaces previously generated cursor paragraph calls that were based
+        on IDMS set names with manual-style paragraph names based on DB2
+        record names.
 
         Example:
             PERFORM OPEN-C-AR-VMBEFF1.
@@ -314,19 +339,116 @@ class Db2CursorParagraphGenerator:
         updated = text
 
         replacements = {
-            str(spec.get("old_open_paragraph", "")): str(spec.get("open_paragraph", "")),
-            str(spec.get("old_fetch_paragraph", "")): str(spec.get("fetch_paragraph", "")),
-            str(spec.get("old_close_paragraph", "")): str(spec.get("close_paragraph", "")),
-            str(spec.get("old_cursor_name", "")): str(spec.get("cursor_name", "")),
+            str(spec.get("old_open_paragraph", "")): str(
+                spec.get(
+                    "open_paragraph",
+                    "",
+                )
+            ),
+            str(spec.get("old_fetch_paragraph", "")): str(
+                spec.get(
+                    "fetch_paragraph",
+                    "",
+                )
+            ),
+            str(spec.get("old_close_paragraph", "")): str(
+                spec.get(
+                    "close_paragraph",
+                    "",
+                )
+            ),
+            str(spec.get("old_cursor_name", "")): str(
+                spec.get(
+                    "cursor_name",
+                    "",
+                )
+            ),
         }
 
         for old_value, new_value in replacements.items():
-            if not old_value or not new_value or old_value == new_value:
+            if not old_value:
+                continue
+
+            if not new_value:
+                continue
+
+            if old_value == new_value:
                 continue
 
             updated = re.sub(
                 rf"\b{re.escape(old_value)}\b",
                 new_value,
+                updated,
+                flags=re.IGNORECASE,
+            )
+
+        return updated
+
+    def _replace_numbered_cursor_calls(
+        self,
+        text: str,
+        spec: dict[str, object],
+    ) -> str:
+        """
+        Rewrites already-numbered cursor PERFORM calls so that procedure
+        logic matches the generated cursor paragraph names.
+
+        This fixes output like:
+
+            PERFORM 710-OPEN-DZEVEFC1.
+            PERFORM 720-FETCH-DZEVEFC1.
+            PERFORM 730-CLOSE-DZEVEFC1.
+
+        when the actual generated paragraph block contains:
+
+            810-OPEN-DZEVEFC1.
+            820-FETCH-DZEVEFC1.
+            830-CLOSE-DZEVEFC1.
+
+        The rewrite is cursor-specific and operation-specific, so it does
+        not change unrelated paragraphs.
+        """
+
+        cursor_name = str(
+            spec.get(
+                "cursor_name",
+                "",
+            )
+        )
+
+        if not cursor_name:
+            return text
+
+        replacements = {
+            "OPEN": str(
+                spec.get(
+                    "open_paragraph",
+                    "",
+                )
+            ),
+            "FETCH": str(
+                spec.get(
+                    "fetch_paragraph",
+                    "",
+                )
+            ),
+            "CLOSE": str(
+                spec.get(
+                    "close_paragraph",
+                    "",
+                )
+            ),
+        }
+
+        updated = text
+
+        for operation, paragraph_name in replacements.items():
+            if not paragraph_name:
+                continue
+
+            updated = re.sub(
+                rf"\bPERFORM\s+\d{{3}}-{operation}-{re.escape(cursor_name)}\b",
+                f"PERFORM {paragraph_name}",
                 updated,
                 flags=re.IGNORECASE,
             )
@@ -352,15 +474,19 @@ class Db2CursorParagraphGenerator:
             cursor_name = str(
                 spec["cursor_name"],
             )
+
             open_paragraph = str(
                 spec["open_paragraph"],
             )
+
             fetch_paragraph = str(
                 spec["fetch_paragraph"],
             )
+
             close_paragraph = str(
                 spec["close_paragraph"],
             )
+
             host_variables = list(
                 spec.get(
                     "host_variables",
@@ -454,6 +580,7 @@ class Db2CursorParagraphGenerator:
                     "END-EVALUATE.",
                 ]
             )
+
             return lines
 
         lines.extend(
@@ -501,6 +628,7 @@ class Db2CursorParagraphGenerator:
 
         for index, host in enumerate(clean_hosts):
             suffix = "," if index < len(clean_hosts) - 1 else ""
+
             lines.append(
                 f"        {host}{suffix}"
             )
@@ -568,9 +696,7 @@ class Db2CursorParagraphGenerator:
         title: str,
     ) -> list[str]:
         return [
-            "******************************************************************",
             f"* {title:<62}*",
-            "******************************************************************",
         ]
 
     def _normalize_host_reference(
@@ -582,7 +708,7 @@ class Db2CursorParagraphGenerator:
         ).strip()
 
         while text.startswith("::"):
-            text = text[1:]
+            text = text[1:].strip()
 
         while text.startswith(": :"):
             text = text[1:].strip()

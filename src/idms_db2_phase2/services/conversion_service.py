@@ -290,6 +290,18 @@ class ConversionService:
             converted_cobol,
         )
 
+        converted_cobol = self._ensure_final_sql_error_paragraph(
+            converted_cobol,
+        )
+
+        converted_cobol = self._ensure_exit_before_sql_error_paragraph(
+            converted_cobol,
+        )
+
+        converted_cobol = self._ensure_period_before_generated_db2_blocks(
+            converted_cobol,
+        )
+
         converted_cobol = self._normalize_single_infrastructure_block(
             converted_cobol,
         )
@@ -342,7 +354,6 @@ class ConversionService:
         )
 
         diagnostic_messages: list[str] = []
-
         diagnostic_messages.extend(
             analysis.diagnostics,
         )
@@ -953,6 +964,501 @@ class ConversionService:
             "\n".join(output_lines),
         ).rstrip() + "\n"
 
+    def _ensure_final_sql_error_paragraph(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Final guard to ensure generated COBOL has a callable SQL-ERROR paragraph.
+
+        Generated DB2 cursor paragraphs and SQL blocks perform SQL-ERROR.
+        This method guarantees SQL-ERROR exists before production validation
+        and before manual sequence numbering.
+        """
+
+        if not text:
+            return ""
+
+        if self._has_sql_error_paragraph(
+            text,
+        ):
+            return text.rstrip() + "\n"
+
+        paragraph = self._sql_error_paragraph_block()
+
+        updated_text = self._insert_sql_error_after_cursor_block(
+            text=text,
+            paragraph=paragraph,
+        )
+
+        if updated_text != text:
+            return updated_text.rstrip() + "\n"
+
+        updated_text = self._insert_sql_error_before_end_program(
+            text=text,
+            paragraph=paragraph,
+        )
+
+        if updated_text != text:
+            return updated_text.rstrip() + "\n"
+
+        return text.rstrip() + "\n\n" + paragraph + "\n"
+
+    def _has_sql_error_paragraph(
+        self,
+        text: str,
+    ) -> bool:
+        patterns = [
+            r"^\s*(?:\d{6}\s+)?SQL-ERROR\.\s*(?:\d{8})?\s*$",
+            r"^\s*(?:\d{6}\s+)?SQLERROR\.\s*(?:\d{8})?\s*$",
+        ]
+
+        for pattern in patterns:
+            if re.search(
+                pattern,
+                text or "",
+                flags=re.IGNORECASE | re.MULTILINE,
+            ):
+                return True
+
+        return False
+
+    def _sql_error_paragraph_block(
+        self,
+    ) -> str:
+        return "\n".join(
+            [
+                "SQL-ERROR.",
+                "    DISPLAY 'DB2 SQL ERROR SQLCODE=' SQLCODE.",
+                "    DISPLAY 'DB2 SQL ERROR LOCATION=' SQL-LOCATION.",
+                "    CONTINUE.",
+            ]
+        )
+
+    def _insert_sql_error_after_cursor_block(
+        self,
+        text: str,
+        paragraph: str,
+    ) -> str:
+        lines = text.splitlines()
+
+        cursor_marker_index = -1
+
+        for index, line in enumerate(lines):
+            logical = self._logical_line(
+                line,
+            ).upper()
+
+            if self.CURSOR_PARAGRAPH_MARKER in logical:
+                cursor_marker_index = index
+
+        if cursor_marker_index < 0:
+            return text
+
+        insert_index = len(lines)
+
+        for index in range(cursor_marker_index + 1, len(lines)):
+            logical = self._logical_line(
+                lines[index],
+            )
+
+            if self.END_PROGRAM_PATTERN.match(
+                logical,
+            ):
+                insert_index = index
+                break
+
+        updated_lines = (
+            lines[:insert_index]
+            + [""]
+            + paragraph.splitlines()
+            + [""]
+            + lines[insert_index:]
+        )
+
+        return self._normalize_blank_lines(
+            "\n".join(updated_lines),
+        ).rstrip() + "\n"
+
+    def _insert_sql_error_before_end_program(
+        self,
+        text: str,
+        paragraph: str,
+    ) -> str:
+        lines = text.splitlines()
+
+        for index, line in enumerate(lines):
+            logical = self._logical_line(
+                line,
+            )
+
+            if self.END_PROGRAM_PATTERN.match(
+                logical,
+            ):
+                updated_lines = (
+                    lines[:index]
+                    + [""]
+                    + paragraph.splitlines()
+                    + [""]
+                    + lines[index:]
+                )
+
+                return self._normalize_blank_lines(
+                    "\n".join(updated_lines),
+                ).rstrip() + "\n"
+
+        return text
+
+    def _ensure_exit_before_sql_error_paragraph(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Ensures SQL-ERROR is not physically attached as the immediate next
+        paragraph after a business/helper paragraph such as READ-FLAT-FILE.
+
+        Example:
+
+            READ-FLAT-FILE.
+                READ OPERATIES INTO VMBD205I
+                    AT END MOVE 'Y' TO SW-EOF.
+
+            SQL-ERROR.
+
+        becomes:
+
+            READ-FLAT-FILE.
+                READ OPERATIES INTO VMBD205I
+                    AT END MOVE 'Y' TO SW-EOF.
+
+            READ-FLAT-FILE-EXIT.
+                EXIT.
+
+            SQL-ERROR.
+
+        This is conservative:
+        - It only runs when SQL-ERROR exists.
+        - It does not modify generated cursor paragraphs.
+        - It does not add duplicate EXIT paragraphs.
+        """
+
+        if not text:
+            return ""
+
+        lines = text.splitlines()
+
+        sql_error_index = self._find_sql_error_start_index(
+            lines,
+        )
+
+        if sql_error_index <= 0:
+            return text.rstrip() + "\n"
+
+        previous_paragraph_index = self._find_previous_paragraph_before_index(
+            lines=lines,
+            end_index=sql_error_index,
+        )
+
+        if previous_paragraph_index < 0:
+            return text.rstrip() + "\n"
+
+        previous_paragraph_name = self._paragraph_name_from_line(
+            lines[previous_paragraph_index],
+        )
+
+        if not previous_paragraph_name:
+            return text.rstrip() + "\n"
+
+        if self._is_generated_or_technical_paragraph(
+            previous_paragraph_name,
+        ):
+            return text.rstrip() + "\n"
+
+        if self._paragraph_has_exit_before_index(
+            lines=lines,
+            paragraph_index=previous_paragraph_index,
+            end_index=sql_error_index,
+        ):
+            return text.rstrip() + "\n"
+
+        exit_paragraph = [
+            "",
+            f"{previous_paragraph_name}-EXIT.",
+            "    EXIT.",
+            "",
+        ]
+
+        updated_lines = (
+            lines[:sql_error_index]
+            + exit_paragraph
+            + lines[sql_error_index:]
+        )
+
+        return self._normalize_blank_lines(
+            "\n".join(updated_lines),
+        ).rstrip() + "\n"
+
+    def _find_previous_paragraph_before_index(
+        self,
+        lines: list[str],
+        end_index: int,
+    ) -> int:
+        for index in range(end_index - 1, -1, -1):
+            logical = self._logical_line(
+                lines[index],
+            )
+
+            if self._is_paragraph_line(
+                logical,
+            ):
+                return index
+
+        return -1
+
+    def _paragraph_name_from_line(
+        self,
+        line: str,
+    ) -> str:
+        logical = self._logical_line(
+            line,
+        )
+
+        if not self._is_paragraph_line(
+            logical,
+        ):
+            return ""
+
+        return logical.strip().rstrip(".").upper()
+
+    def _is_paragraph_line(
+        self,
+        logical: str,
+    ) -> bool:
+        text = str(
+            logical or "",
+        ).strip()
+
+        if not text:
+            return False
+
+        if text.startswith("*"):
+            return False
+
+        if not self.NEXT_PARAGRAPH_PATTERN.match(
+            text,
+        ):
+            return False
+
+        upper = text.upper().rstrip(".")
+
+        if upper in {
+            "CONTINUE",
+            "ELSE",
+            "END-IF",
+            "END-EVALUATE",
+            "END-EXEC",
+            "EXIT",
+            "GOBACK",
+            "STOP",
+            "EJECT",
+            "SKIP1",
+            "SKIP2",
+            "SKIP3",
+            "SPACE",
+            "SPACES",
+            "RETURN",
+        }:
+            return False
+
+        if upper.startswith(
+            "END-",
+        ):
+            return False
+
+        return True
+
+    def _is_generated_or_technical_paragraph(
+        self,
+        paragraph_name: str,
+    ) -> bool:
+        name = str(
+            paragraph_name or "",
+        ).strip().upper()
+
+        if not name:
+            return False
+
+        if name == "SQL-ERROR":
+            return True
+
+        if name == "SQLERROR":
+            return True
+
+        if re.match(
+            r"^\d{3}-(OPEN|FETCH|CLOSE)-",
+            name,
+            flags=re.IGNORECASE,
+        ):
+            return True
+
+        if name.startswith(
+            "600-GET-TIMESTAMP",
+        ):
+            return True
+
+        return False
+
+    def _paragraph_has_exit_before_index(
+        self,
+        lines: list[str],
+        paragraph_index: int,
+        end_index: int,
+    ) -> bool:
+        paragraph_name = self._paragraph_name_from_line(
+            lines[paragraph_index],
+        )
+
+        exit_paragraph_name = f"{paragraph_name}-EXIT"
+
+        for index in range(paragraph_index + 1, end_index):
+            logical = self._logical_line(
+                lines[index],
+            )
+
+            upper = logical.strip().upper().rstrip(".")
+
+            if upper == "EXIT":
+                return True
+
+            if upper == exit_paragraph_name:
+                return True
+
+        return False
+
+    def _ensure_period_before_generated_db2_blocks(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Adds a period to safe unterminated MOVE statements immediately before
+        generated DB2 conversion blocks.
+
+        Example fixed:
+
+            MOVE SPACE TO WS-STATUS
+            * DB2: Converted OBTAIN FIRST ...
+
+        becomes:
+
+            MOVE SPACE TO WS-STATUS.
+            * DB2: Converted OBTAIN FIRST ...
+
+        This is intentionally conservative:
+        - only MOVE statements are changed;
+        - comments and already-terminated statements are ignored;
+        - a period is added only when the next meaningful line starts a
+          generated DB2 block or a generated cursor paragraph call.
+        """
+
+        if not text:
+            return ""
+
+        lines = text.splitlines()
+        output: list[str] = []
+
+        for index, line in enumerate(lines):
+            current = self._logical_line_preserve_indent(
+                line,
+            )
+
+            next_logical = self._next_meaningful_logical_line(
+                lines=lines,
+                start_index=index + 1,
+            )
+
+            if self._needs_period_before_generated_db2_block(
+                current=current,
+                next_logical=next_logical,
+            ):
+                output.append(
+                    self._append_period_to_physical_line(
+                        line,
+                    )
+                )
+                continue
+
+            output.append(
+                line,
+            )
+
+        return "\n".join(output).rstrip() + "\n"
+
+    def _needs_period_before_generated_db2_block(
+        self,
+        current: str,
+        next_logical: str,
+    ) -> bool:
+        current_text = str(
+            current or "",
+        ).rstrip()
+
+        next_text = str(
+            next_logical or "",
+        ).strip()
+
+        if not current_text:
+            return False
+
+        if current_text.endswith("."):
+            return False
+
+        if current_text.strip().startswith("*"):
+            return False
+
+        current_upper = current_text.strip().upper()
+        next_upper = next_text.upper()
+
+        if not current_upper.startswith("MOVE "):
+            return False
+
+        if next_upper.startswith("* DB2:"):
+            return True
+
+        if re.match(
+            r"^PERFORM\s+\d{3}-(OPEN|FETCH|CLOSE)-",
+            next_upper,
+            flags=re.IGNORECASE,
+        ):
+            return True
+
+        return False
+
+    def _append_period_to_physical_line(
+        self,
+        line: str,
+    ) -> str:
+        text = str(
+            line or "",
+        ).rstrip()
+
+        right_match = self.RIGHT_SEQUENCE_PATTERN.match(
+            text,
+        )
+
+        if right_match and right_match.group("right"):
+            body = right_match.group("body").rstrip()
+            right = right_match.group("right")
+
+            if body.endswith("."):
+                return text
+
+            return f"{body}. {right}"
+
+        if text.endswith("."):
+            return text
+
+        return text + "."
+
     def _find_sql_error_start_index(
         self,
         lines: list[str],
@@ -1003,6 +1509,11 @@ class ConversionService:
             upper = logical.upper()
 
             if upper.startswith("DISPLAY ") or upper.startswith("MOVE "):
+                seen_sql_error_body = True
+                index += 1
+                continue
+
+            if upper.startswith("CONTINUE"):
                 seen_sql_error_body = True
                 index += 1
                 continue
